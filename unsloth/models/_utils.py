@@ -70,7 +70,8 @@ __all__ = [
     
     # Multi-GPU support
     "get_multi_gpu_config",
-    "get_optimal_device_map",
+    "get_optimal_device_map", 
+    "init_distributed_training_if_needed",
 ]
 
 import torch
@@ -94,11 +95,16 @@ def get_multi_gpu_config():
         os.environ.get("RANK") is not None
     )
     
+    # Check if we should auto-enable multi-GPU when multiple GPUs are available
+    auto_enable_multi_gpu = DEVICE_COUNT > 1 and DEVICE_TYPE == "cuda" and not is_distributed
+    
     return {
         "enable_multi_gpu": enable_multi_gpu,
         "is_distributed": is_distributed,
         "device_count": DEVICE_COUNT,
-        "supports_multi_gpu": DEVICE_COUNT > 1 and DEVICE_TYPE == "cuda"
+        "supports_multi_gpu": DEVICE_COUNT > 1 and DEVICE_TYPE == "cuda",
+        "auto_enable_multi_gpu": auto_enable_multi_gpu,
+        "needs_distributed_init": enable_multi_gpu and not is_distributed and DEVICE_COUNT > 1
     }
 
 def get_optimal_device_map(model_config=None, enable_multi_gpu=False):
@@ -118,6 +124,44 @@ def get_optimal_device_map(model_config=None, enable_multi_gpu=False):
         return "auto"
     
     return "sequential"
+
+def init_distributed_training_if_needed():
+    """Initialize distributed training if conditions are met but not already initialized."""
+    import torch
+    import torch.distributed as dist
+    
+    multi_gpu_config = get_multi_gpu_config()
+    
+    # Only proceed if we need distributed init and it's not already done
+    if not multi_gpu_config["needs_distributed_init"]:
+        return False
+    
+    # Check if distributed is already initialized
+    if dist.is_available() and dist.is_initialized():
+        return False
+    
+    try:
+        # Set up environment variables for distributed training
+        if os.environ.get("MASTER_ADDR") is None:
+            os.environ["MASTER_ADDR"] = "localhost"
+        if os.environ.get("MASTER_PORT") is None:
+            os.environ["MASTER_PORT"] = "29500"
+        if os.environ.get("WORLD_SIZE") is None:
+            os.environ["WORLD_SIZE"] = str(multi_gpu_config["device_count"])
+        if os.environ.get("RANK") is None:
+            os.environ["RANK"] = "0"  # Main process
+        if os.environ.get("LOCAL_RANK") is None:
+            os.environ["LOCAL_RANK"] = "0"  # Main process
+        
+        # For single-process multi-GPU, we don't actually need distributed
+        # but we set up the environment for future distributed calls
+        print(f"Unsloth: Multi-GPU environment detected with {multi_gpu_config['device_count']} GPUs")
+        print("Unsloth: For distributed training, use: torchrun --nproc_per_node={} your_script.py".format(multi_gpu_config["device_count"]))
+        return True
+        
+    except Exception as e:
+        print(f"Unsloth: Warning - Could not set up multi-GPU environment: {e}")
+        return False
 
 from unsloth_zoo.tokenizer_utils import (
     patch_tokenizer as _patch_tokenizer,
