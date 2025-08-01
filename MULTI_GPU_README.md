@@ -69,7 +69,7 @@ model = FastLanguageModel.get_peft_model(
     use_gradient_checkpointing="unsloth",
 )
 
-# Train with standard SFTTrainer
+# Train with SFTTrainer (automatically gets DDP support when unsloth is imported)
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
@@ -121,8 +121,9 @@ model = FastLanguageModel.get_peft_model(
     use_gradient_checkpointing="unsloth",
 )
 
-# Use UnslothTrainer for distributed training
-trainer = UnslothTrainer(
+# Use SFTTrainer - automatically gets DDP support when unsloth is imported
+# Or use UnslothTrainer explicitly if preferred
+trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
     train_dataset=dataset,
@@ -160,10 +161,10 @@ trainer.train()
 | Mode | Use Case | Memory | Speed | Setup | Trainer |
 |------|----------|---------|-------|-------|---------|
 | Single-GPU | Small models, limited hardware | Low | Baseline | Default | `SFTTrainer` |
-| Single-Process Multi-GPU | Medium models, inference | Medium | 1.5-2x | `device_map="auto"` | `SFTTrainer` or `UnslothTrainer` |
-| Distributed (DDP) | Large models, maximum speed | High | 2-4x | `torchrun` | `UnslothTrainer` (recommended) |
+| Single-Process Multi-GPU | Medium models, inference | Medium | 1.5-2x | `device_map="auto"` | `SFTTrainer` (auto-patched) |
+| Distributed (DDP) | Large models, maximum speed | High | 2-4x | `torchrun` | `SFTTrainer` (auto-patched) or `UnslothTrainer` |
 
-**Note**: `UnslothTrainer` is required for distributed training to avoid gradient checkpointing issues.
+**Note**: When you import unsloth, `SFTTrainer` is automatically patched with DDP support to avoid gradient checkpointing issues.
 
 ## Performance Tips
 
@@ -237,20 +238,25 @@ RuntimeError: Expected to mark a variable ready only once.
 Parameter base_model.model.model.layers.X.mlp.gate_proj.lora_A.default.weight has been marked as ready twice.
 ```
 
-**Solution**: Use `UnslothTrainer` instead of `SFTTrainer` for distributed training:
+**Solution**: Import unsloth before using SFTTrainer (automatic fix) or use UnslothTrainer explicitly:
 
 ```python
-# ❌ This can cause DDP issues:
+# ✅ Option 1: Automatic fix (recommended)
+import unsloth  # This patches SFTTrainer automatically
 from trl import SFTTrainer
 trainer = SFTTrainer(...)
 
-# ✅ This is fixed:
+# ✅ Option 2: Explicit UnslothTrainer usage
 from unsloth import UnslothTrainer
 trainer = UnslothTrainer(...)
+
+# ❌ This can cause DDP issues:
+from trl import SFTTrainer  # Without importing unsloth first
+trainer = SFTTrainer(...)
 ```
 
 **Technical Details**: 
-- `UnslothTrainer` automatically enables DDP static graph optimization
+- When unsloth is imported, `SFTTrainer` is automatically patched with DDP static graph optimization
 - This tells PyTorch that the model structure doesn't change during training
 - Safe for fine-tuning scenarios and improves DDP performance
 - Can be disabled with `UNSLOTH_DISABLE_DDP_STATIC_GRAPH=1` if needed

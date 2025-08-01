@@ -59,20 +59,29 @@ The DDP setup is performed lazily just before the first training step, ensuring 
 
 ## Usage
 
-### Before (causes DDP errors):
+### Option 1: Automatic SFTTrainer Patching (Recommended)
+
+When you import unsloth, SFTTrainer is automatically patched with DDP support:
 
 ```python
+import unsloth  # This automatically patches SFTTrainer with DDP support
 from trl import SFTTrainer
 
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
     # ... other args
+    args=SFTConfig(
+        # ... training args
+        ddp_find_unused_parameters=False,  # Recommended for better DDP performance
+    )
 )
-trainer.train()  # Causes "parameter marked ready twice" error
+trainer.train()  # Now works correctly with distributed training!
 ```
 
-### After (fixed):
+### Option 2: Explicit UnslothTrainer Usage
+
+You can still use UnslothTrainer explicitly if preferred:
 
 ```python
 from unsloth import UnslothTrainer
@@ -87,6 +96,19 @@ trainer = UnslothTrainer(
     )
 )
 trainer.train()  # Works correctly with distributed training
+```
+
+### Before (causes DDP errors):
+
+```python
+from trl import SFTTrainer  # Without importing unsloth first
+
+trainer = SFTTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    # ... other args
+)
+trainer.train()  # Causes "parameter marked ready twice" error
 ```
 
 ## Running Distributed Training
