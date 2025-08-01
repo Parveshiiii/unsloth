@@ -96,7 +96,8 @@ def example_single_process_multi_gpu():
     dataset = load_dataset("alpaca", split = "train")
     
     # Training
-    trainer = SFTTrainer(
+    from unsloth import UnslothTrainer
+    trainer = UnslothTrainer(
         model = model,
         tokenizer = tokenizer,
         train_dataset = dataset,
@@ -118,6 +119,8 @@ def example_single_process_multi_gpu():
             lr_scheduler_type = "linear",
             seed = 3407,
             output_dir = "outputs",
+            # DDP specific settings for better distributed training
+            ddp_find_unused_parameters = False,
         ),
     )
     
