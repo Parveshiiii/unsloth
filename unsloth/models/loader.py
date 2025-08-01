@@ -76,6 +76,8 @@ from ._utils import (
     patch_compiled_autograd,
     process_vision_info,
     unsloth_compile_transformers,
+    get_multi_gpu_config,
+    get_optimal_device_map,
 )
 
 global FORCE_FLOAT32
@@ -101,6 +103,9 @@ class FastLanguageModel(FastLlamaModel):
         resize_model_vocab         = None,
         revision                   = None,
         use_exact_model_name       = False,
+        
+        # Multi-GPU training support
+        enable_multi_gpu           = None,  # If None, auto-detected from environment
 
         fast_inference             = False, # uses vLLM
         gpu_memory_utilization     = 0.5,
@@ -110,6 +115,19 @@ class FastLanguageModel(FastLlamaModel):
         disable_log_stats          = True,
         *args, **kwargs,
     ):
+        # Handle multi-GPU configuration
+        multi_gpu_config = get_multi_gpu_config()
+        
+        # Auto-detect enable_multi_gpu if not explicitly set
+        if enable_multi_gpu is None:
+            enable_multi_gpu = multi_gpu_config["enable_multi_gpu"]
+        
+        # Override device_map for multi-GPU if needed
+        if enable_multi_gpu and device_map == "sequential":
+            device_map = get_optimal_device_map(enable_multi_gpu=True)
+            if multi_gpu_config["supports_multi_gpu"]:
+                print(f"Unsloth: Multi-GPU training enabled with device_map='{device_map}' on {multi_gpu_config['device_count']} GPUs")
+        
         if load_in_8bit or full_finetuning:
             return FastModel.from_pretrained(
                 model_name                 = model_name,
@@ -129,6 +147,7 @@ class FastLanguageModel(FastLlamaModel):
                 return_logits              = False, # Return logits
                 fullgraph                  = True, # No graph breaks
                 use_exact_model_name       = use_exact_model_name,
+                enable_multi_gpu           = enable_multi_gpu,
                 *args, **kwargs,
             )
         pass
@@ -509,8 +528,25 @@ class FastModel(FastBaseModel):
         whisper_language           = None,
         whisper_task               = None,
         unsloth_force_compile      = False,
+        
+        # Multi-GPU training support  
+        enable_multi_gpu           = None,  # If None, auto-detected from environment
+        
         *args, **kwargs,
     ):
+        # Handle multi-GPU configuration
+        multi_gpu_config = get_multi_gpu_config()
+        
+        # Auto-detect enable_multi_gpu if not explicitly set
+        if enable_multi_gpu is None:
+            enable_multi_gpu = multi_gpu_config["enable_multi_gpu"]
+        
+        # Override device_map for multi-GPU if needed
+        if enable_multi_gpu and device_map == "sequential":
+            device_map = get_optimal_device_map(enable_multi_gpu=True)
+            if multi_gpu_config["supports_multi_gpu"]:
+                print(f"Unsloth: Multi-GPU training enabled with device_map='{device_map}' on {multi_gpu_config['device_count']} GPUs")
+        
         if token is None: token = get_token()
         if whisper_language is not None: assert(type(whisper_language) is str)
         if whisper_task is not None: assert(type(whisper_task) is str)
