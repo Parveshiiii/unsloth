@@ -11,13 +11,19 @@ This document describes the new multi-GPU training support in Unsloth, allowing 
 
 ## Quick Start
 
-### 1. Enable Multi-GPU Training
+### 1. Enable Multi-GPU Training (NEW - Improved)
 
-#### Method 1: Environment Variable
+#### Method 1: Environment Variable (Recommended)
 ```bash
 export UNSLOTH_ENABLE_MULTIGPU=1
 python your_training_script.py
 ```
+
+The system will now automatically:
+- Detect available GPUs
+- Configure optimal device mapping
+- Set up distributed training environment if needed
+- Provide helpful guidance for distributed training setup
 
 #### Method 2: Function Parameter
 ```python
@@ -28,7 +34,8 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     max_seq_length=2048,
     load_in_4bit=True,
     enable_multi_gpu=True,  # Enable multi-GPU support
-    device_map="auto",      # Automatically distribute across GPUs
+    device_map="auto",      # Automatically distribute across GPUs (optional, auto-detected)
+)
 )
 ```
 
@@ -182,12 +189,19 @@ trainer.train()
    - Increase `gradient_accumulation_steps`
    - Enable 4-bit quantization: `load_in_4bit=True`
 
-2. **Distributed Training Hangs**:
+2. **Multi-GPU Training Not Working (Fixed in this version)**:
+   - **Symptom**: "Num GPUs = 4" shown but training uses only 1 GPU
+   - **Solution**: Set `UNSLOTH_ENABLE_MULTIGPU=1` environment variable
+   - **Auto-fix**: System now automatically detects and configures multi-GPU
+   - **Verification**: Look for "Multi-GPU training enabled" message in output
+   - **Alternative**: Use explicit `enable_multi_gpu=True` parameter
+
+3. **Distributed Training Hangs**:
    - Check network connectivity between nodes
    - Verify all processes can access the same dataset
    - Ensure consistent environment across all processes
 
-3. **Model Loading Errors**:
+4. **Model Loading Errors**:
    - Verify all GPUs have sufficient memory
    - Check CUDA compatibility
    - Try `device_map="sequential"` for debugging

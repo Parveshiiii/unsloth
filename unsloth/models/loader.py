@@ -78,6 +78,7 @@ from ._utils import (
     unsloth_compile_transformers,
     get_multi_gpu_config,
     get_optimal_device_map,
+    init_distributed_training_if_needed,
 )
 
 global FORCE_FLOAT32
@@ -121,6 +122,10 @@ class FastLanguageModel(FastLlamaModel):
         # Auto-detect enable_multi_gpu if not explicitly set
         if enable_multi_gpu is None:
             enable_multi_gpu = multi_gpu_config["enable_multi_gpu"]
+        
+        # Initialize distributed training if needed
+        if enable_multi_gpu:
+            init_distributed_training_if_needed()
         
         # Override device_map for multi-GPU if needed
         if enable_multi_gpu and device_map == "sequential":
@@ -540,6 +545,10 @@ class FastModel(FastBaseModel):
         # Auto-detect enable_multi_gpu if not explicitly set
         if enable_multi_gpu is None:
             enable_multi_gpu = multi_gpu_config["enable_multi_gpu"]
+        
+        # Initialize distributed training if needed
+        if enable_multi_gpu:
+            init_distributed_training_if_needed()
         
         # Override device_map for multi-GPU if needed
         if enable_multi_gpu and device_map == "sequential":

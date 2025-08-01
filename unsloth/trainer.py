@@ -21,6 +21,7 @@ import trl
 import inspect
 from trl import SFTTrainer
 from . import is_bfloat16_supported
+from .models._utils import get_multi_gpu_config, init_distributed_training_if_needed
 from unsloth_zoo.training_utils import (
     unsloth_train as _unsloth_train,
 )
@@ -127,6 +128,14 @@ class UnslothTrainer(SFTTrainer):
     def _setup_distributed_training(self):
         """Setup distributed training if in multi-GPU environment."""
         import os
+        import torch
+        
+        # Get multi-GPU configuration
+        multi_gpu_config = get_multi_gpu_config()
+        
+        # Initialize distributed training if needed
+        if multi_gpu_config["enable_multi_gpu"]:
+            init_distributed_training_if_needed()
         
         # Check if we're in a distributed environment
         if (os.environ.get("LOCAL_RANK") is not None or 
@@ -136,11 +145,22 @@ class UnslothTrainer(SFTTrainer):
                 if not dist.is_initialized():
                     # Initialize distributed training
                     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-                    torch.cuda.set_device(local_rank)
-                    dist.init_process_group(backend="nccl")
+                    if torch.cuda.is_available():
+                        torch.cuda.set_device(local_rank)
+                    dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
                     print(f"Unsloth: Initialized distributed training on rank {local_rank}")
+                    
+                    # Set up proper device mapping for this rank
+                    if torch.cuda.is_available():
+                        device = torch.device(f"cuda:{local_rank}")
+                        print(f"Unsloth: Using device {device} for rank {local_rank}")
+                    
             except Exception as e:
                 print(f"Unsloth: Failed to initialize distributed training: {e}")
+                print("Unsloth: Falling back to single-GPU training")
+        elif multi_gpu_config["supports_multi_gpu"] and multi_gpu_config["enable_multi_gpu"]:
+            print(f"Unsloth: Multi-GPU setup detected ({multi_gpu_config['device_count']} GPUs) but not using distributed training")
+            print("Unsloth: For true distributed training, launch with: torchrun --nproc_per_node={} your_script.py".format(multi_gpu_config['device_count']))
     
     def create_optimizer(self):
         embedding_learning_rate = getattr(self.args, "embedding_learning_rate", None)

@@ -5,6 +5,52 @@ Example script demonstrating Unsloth multi-GPU training.
 This script shows how to use Unsloth with multiple GPUs for distributed training.
 """
 
+# Example 0: Auto-detection multi-GPU training (NEW - improved auto-detection)
+def example_auto_detection_multi_gpu():
+    """Example of auto-detection multi-GPU training."""
+    print("Example 0: Auto-detection multi-GPU training")
+    print("-" * 50)
+    
+    import os
+    
+    # Enable multi-GPU training via environment variable
+    os.environ["UNSLOTH_ENABLE_MULTIGPU"] = "1"
+    
+    # Import unsloth - it will now auto-detect and setup multi-GPU
+    from unsloth import FastLanguageModel
+    import torch
+    from trl import SFTTrainer, SFTConfig
+    
+    print(f"Available GPUs: {torch.cuda.device_count() if torch.cuda.is_available() else 0}")
+    
+    # Load model - multi-GPU will be auto-detected and configured
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name = "unsloth/Llama-3.2-1B-Instruct",
+        max_seq_length = 2048,
+        dtype = None,
+        load_in_4bit = True,
+        # No need to specify enable_multi_gpu=True, it's auto-detected from environment
+        # device_map will be automatically set to "auto" for multi-GPU
+    )
+    
+    print("Model loaded successfully with auto-detected multi-GPU configuration")
+    
+    # Continue with normal training setup...
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r = 16,
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+                          "gate_proj", "up_proj", "down_proj",],
+        lora_alpha = 16,
+        lora_dropout = 0,
+        bias = "none",
+        use_gradient_checkpointing = "unsloth",
+        random_state = 3407,
+    )
+    
+    print("LoRA adapters configured for multi-GPU training")
+    return model, tokenizer
+
 # Example 1: Single-process multi-GPU training (uses multiple GPUs in one process)
 def example_single_process_multi_gpu():
     """Example of single-process multi-GPU training."""
@@ -168,6 +214,15 @@ def main():
     example_environment_setup()
     print("")
     
+    try:
+        # New auto-detection example
+        print("Running auto-detection example...")
+        example_auto_detection_multi_gpu()
+        print("Auto-detection example completed successfully!")
+    except Exception as e:
+        print(f"Auto-detection example failed (expected in environments without GPUs): {e}")
+    print("")
+    
     example_single_process_multi_gpu()
     print("")
     
@@ -176,6 +231,8 @@ def main():
     
     print("=" * 60)
     print("Notes:")
+    print("- NEW: Auto-detection now works by setting UNSLOTH_ENABLE_MULTIGPU=1")
+    print("- NEW: Improved distributed training initialization")
     print("- Single-process multi-GPU (device_map='auto') works best for inference")
     print("- Distributed training (DDP) is recommended for training large models")
     print("- Unsloth automatically detects your environment and configures accordingly")
