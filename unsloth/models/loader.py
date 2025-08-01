@@ -127,10 +127,13 @@ class FastLanguageModel(FastLlamaModel):
         if enable_multi_gpu:
             init_distributed_training_if_needed()
         
-        # Override device_map for multi-GPU if needed
-        if enable_multi_gpu and device_map == "sequential":
+        # Override device_map for multi-GPU or distributed training if needed
+        if multi_gpu_config["is_distributed"] or (enable_multi_gpu and device_map == "sequential"):
+            original_device_map = device_map
             device_map = get_optimal_device_map(enable_multi_gpu=True)
-            if multi_gpu_config["supports_multi_gpu"]:
+            if multi_gpu_config["is_distributed"]:
+                print(f"Unsloth: Distributed training detected - using device_map='{device_map}' for rank {os.environ.get('LOCAL_RANK', 0)}")
+            elif multi_gpu_config["supports_multi_gpu"]:
                 print(f"Unsloth: Multi-GPU training enabled with device_map='{device_map}' on {multi_gpu_config['device_count']} GPUs")
         
         if load_in_8bit or full_finetuning:
@@ -550,10 +553,13 @@ class FastModel(FastBaseModel):
         if enable_multi_gpu:
             init_distributed_training_if_needed()
         
-        # Override device_map for multi-GPU if needed
-        if enable_multi_gpu and device_map == "sequential":
+        # Override device_map for multi-GPU or distributed training if needed
+        if multi_gpu_config["is_distributed"] or (enable_multi_gpu and device_map == "sequential"):
+            original_device_map = device_map
             device_map = get_optimal_device_map(enable_multi_gpu=True)
-            if multi_gpu_config["supports_multi_gpu"]:
+            if multi_gpu_config["is_distributed"]:
+                print(f"Unsloth: Distributed training detected - using device_map='{device_map}' for rank {os.environ.get('LOCAL_RANK', 0)}")
+            elif multi_gpu_config["supports_multi_gpu"]:
                 print(f"Unsloth: Multi-GPU training enabled with device_map='{device_map}' on {multi_gpu_config['device_count']} GPUs")
         
         if token is None: token = get_token()
