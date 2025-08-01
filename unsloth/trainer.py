@@ -156,7 +156,10 @@ class UnslothTrainer(SFTTrainer):
             # Try multiple times with the latest model reference
             # In case Accelerate wrapped the model after init
             success = False
-            for model_ref in [model, getattr(self, 'model', None), getattr(self, 'accelerator', {}).get('model', None)]:
+            accelerator_model = None
+            if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'model'):
+                accelerator_model = self.accelerator.model
+            for model_ref in [model, getattr(self, 'model', None), accelerator_model]:
                 if model_ref is not None:
                     if self._setup_ddp_static_graph(model_ref):
                         success = True
@@ -465,7 +468,10 @@ def _patch_trainer_with_ddp_support(trainer_class):
             # Try multiple times with the latest model reference
             # In case Accelerate wrapped the model after init
             success = False
-            for model_ref in [model, getattr(self, 'model', None), getattr(self, 'accelerator', {}).get('model', None)]:
+            accelerator_model = None
+            if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'model'):
+                accelerator_model = self.accelerator.model
+            for model_ref in [model, getattr(self, 'model', None), accelerator_model]:
                 if model_ref is not None:
                     if _setup_ddp_static_graph(model_ref):
                         success = True
