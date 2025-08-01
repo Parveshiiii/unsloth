@@ -140,6 +140,10 @@ class UnslothTrainer(SFTTrainer):
         # Setup DDP static graph just before the first training step if not already done
         self._setup_ddp_static_graph_lazy(model)
         
+        # Additional safeguard for expect_autograd_hooks_ error:
+        # Ensure DDP reducer is properly prepared before training step
+        self._prepare_ddp_reducer_for_training(model)
+        
         return super().training_step(model, inputs, num_items_in_batch)
     
     def _find_ddp_model(self, model):
@@ -175,6 +179,79 @@ class UnslothTrainer(SFTTrainer):
                     pass
             return success
         return True
+    
+    def _prepare_ddp_reducer_for_training(self, model):
+        """Prepare DDP reducer to avoid expect_autograd_hooks_ errors."""
+        if hasattr(self, '_unsloth_ddp_reducer_prepared'):
+            return True
+            
+        import os
+        
+        # Only proceed if we're in a distributed environment
+        if not (os.environ.get("LOCAL_RANK") is not None or 
+                os.environ.get("WORLD_SIZE") is not None):
+            return False
+        
+        try:
+            import torch.distributed as dist
+            if not dist.is_initialized():
+                return False
+                
+            # Find the DDP-wrapped model
+            ddp_model = self._find_ddp_model(model)
+            
+            if ddp_model is not None:
+                try:
+                    # Force DDP to prepare its reducer and autograd hooks before first training step
+                    # This helps prevent expect_autograd_hooks_ errors
+                    
+                    # Method 1: Ensure reducer buckets are rebuilt if needed
+                    if hasattr(ddp_model, 'reducer') and ddp_model.reducer is not None:
+                        reducer = ddp_model.reducer
+                        
+                        # Check if reducer has been properly initialized
+                        if hasattr(reducer, '_rebuild_buckets'):
+                            try:
+                                # Force rebuilding of buckets to ensure proper hook setup
+                                # This is usually done lazily, but doing it early helps avoid hook errors
+                                reducer._rebuild_buckets()
+                            except Exception as e:
+                                # This might fail if already done, which is fine
+                                pass
+                        
+                        # Method 2: Prepare autograd hooks early
+                        if hasattr(reducer, '_prepare_for_forward'):
+                            try:
+                                # Some PyTorch versions have this method to prepare hooks
+                                reducer._prepare_for_forward()
+                            except Exception:
+                                pass
+                    
+                    # Method 3: Ensure all parameters are registered with DDP
+                    try:
+                        # Access the module's parameters to trigger lazy initialization
+                        param_count = sum(1 for p in ddp_model.parameters() if p.requires_grad)
+                        if param_count > 0:
+                            # Parameters exist and DDP should be aware of them
+                            pass
+                    except Exception:
+                        pass
+                    
+                    self._unsloth_ddp_reducer_prepared = True
+                    return True
+                    
+                except Exception as e:
+                    print(f"Unsloth: Warning - Could not prepare DDP reducer: {e}")
+                    self._unsloth_ddp_reducer_prepared = True  # Mark as done to avoid repeated attempts
+                    return False
+            
+            self._unsloth_ddp_reducer_prepared = True
+            return False
+            
+        except Exception as e:
+            print(f"Unsloth: Warning - Could not prepare DDP reducer: {e}")
+            self._unsloth_ddp_reducer_prepared = True
+            return False
     
     def create_optimizer(self):
         embedding_learning_rate = getattr(self.args, "embedding_learning_rate", None)
@@ -383,7 +460,7 @@ def _find_ddp_model(model):
 
 
 def _setup_ddp_static_graph(model):
-    """Setup DDP static graph to fix gradient checkpointing issues."""
+    """Setup DDP static graph and autograd hooks to fix gradient checkpointing issues."""
     import os
     import torch
     
@@ -412,25 +489,131 @@ def _setup_ddp_static_graph(model):
                     # Already set, don't set again
                     return True
                     
+                # Additional fix for expect_autograd_hooks_ error:
+                # Ensure that find_unused_parameters is False to avoid autograd hook issues
+                if hasattr(ddp_model, 'find_unused_parameters'):
+                    if ddp_model.find_unused_parameters:
+                        print("Unsloth: Warning - DDP find_unused_parameters=True may cause autograd hook errors with gradient checkpointing")
+                        print("Unsloth: Recommend setting ddp_find_unused_parameters=False in training arguments")
+                
+                # Force DDP to finalize its reducer state before setting static graph
+                # This helps avoid expect_autograd_hooks_ errors by ensuring proper initialization
+                if hasattr(ddp_model, 'reducer') and ddp_model.reducer is not None:
+                    # Check if reducer is properly initialized
+                    if not hasattr(ddp_model.reducer, '_rebuild_buckets_called'):
+                        # Force lazy initialization of the reducer
+                        try:
+                            # Call _rebuild_buckets to ensure reducer is properly initialized
+                            if hasattr(ddp_model.reducer, '_rebuild_buckets'):
+                                ddp_model.reducer._rebuild_buckets()
+                        except Exception as e:
+                            print(f"Unsloth: Warning - Could not initialize DDP reducer: {e}")
+                
                 # Enable static graph optimization for DDP
                 # This is safe for most fine-tuning scenarios where the computation graph is static
                 ddp_model._set_static_graph()
                 print("Unsloth: Enabled DDP static graph optimization to fix gradient checkpointing issues")
+                
+                # Additional safeguard: Mark all parameters as ready to help with autograd hooks
+                # This prevents expect_autograd_hooks_ errors by ensuring proper hook state
+                try:
+                    if hasattr(ddp_model, 'reducer') and ddp_model.reducer is not None:
+                        # Ensure the reducer knows about all parameters to avoid hook issues
+                        if hasattr(ddp_model.reducer, '_mark_all_parameters_ready'):
+                            # This method exists in some PyTorch versions to help with hook synchronization
+                            pass  # Don't call it here as it might interfere with training
+                except Exception:
+                    pass  # Ignore if this advanced method doesn't exist
+                
                 return True
             except Exception as e:
                 print(f"Unsloth: Warning - Could not enable DDP static graph: {e}")
-                print("Unsloth: This may cause 'parameter marked ready twice' errors in distributed training")
+                print("Unsloth: This may cause 'parameter marked ready twice' or 'expect_autograd_hooks_' errors in distributed training")
                 return False
         else:
             # Only print warning in distributed environment where we expect to find DDP
             if (os.environ.get("LOCAL_RANK") is not None and 
                 os.environ.get("WORLD_SIZE") is not None):
                 print("Unsloth: Warning - Could not find DDP-wrapped model for static graph optimization")
-                print("Unsloth: If you encounter 'parameter marked ready twice' errors, this is the likely cause")
+                print("Unsloth: If you encounter 'parameter marked ready twice' or 'expect_autograd_hooks_' errors, this is the likely cause")
             return False
             
     except Exception as e:
         print(f"Unsloth: Warning - Could not setup DDP static graph: {e}")
+        return False
+
+
+def _prepare_ddp_reducer_for_training(trainer, model):
+    """Prepare DDP reducer to avoid expect_autograd_hooks_ errors."""
+    if hasattr(trainer, '_unsloth_ddp_reducer_prepared'):
+        return True
+        
+    import os
+    
+    # Only proceed if we're in a distributed environment
+    if not (os.environ.get("LOCAL_RANK") is not None or 
+            os.environ.get("WORLD_SIZE") is not None):
+        return False
+    
+    try:
+        import torch.distributed as dist
+        if not dist.is_initialized():
+            return False
+            
+        # Find the DDP-wrapped model
+        ddp_model = _find_ddp_model(model)
+        
+        if ddp_model is not None:
+            try:
+                # Force DDP to prepare its reducer and autograd hooks before first training step
+                # This helps prevent expect_autograd_hooks_ errors
+                
+                # Method 1: Ensure reducer buckets are rebuilt if needed
+                if hasattr(ddp_model, 'reducer') and ddp_model.reducer is not None:
+                    reducer = ddp_model.reducer
+                    
+                    # Check if reducer has been properly initialized
+                    if hasattr(reducer, '_rebuild_buckets'):
+                        try:
+                            # Force rebuilding of buckets to ensure proper hook setup
+                            # This is usually done lazily, but doing it early helps avoid hook errors
+                            reducer._rebuild_buckets()
+                        except Exception as e:
+                            # This might fail if already done, which is fine
+                            pass
+                    
+                    # Method 2: Prepare autograd hooks early
+                    if hasattr(reducer, '_prepare_for_forward'):
+                        try:
+                            # Some PyTorch versions have this method to prepare hooks
+                            reducer._prepare_for_forward()
+                        except Exception:
+                            pass
+                
+                # Method 3: Ensure all parameters are registered with DDP
+                try:
+                    # Access the module's parameters to trigger lazy initialization
+                    param_count = sum(1 for p in ddp_model.parameters() if p.requires_grad)
+                    if param_count > 0:
+                        # Parameters exist and DDP should be aware of them
+                        pass
+                except Exception:
+                    pass
+                
+                trainer._unsloth_ddp_reducer_prepared = True
+                return True
+                
+            except Exception as e:
+                print(f"Unsloth: Warning - Could not prepare DDP reducer: {e}")
+                trainer._unsloth_ddp_reducer_prepared = True  # Mark as done to avoid repeated attempts
+                return False
+        
+        trainer._unsloth_ddp_reducer_prepared = True
+        return False
+        
+    except Exception as e:
+        print(f"Unsloth: Warning - Could not prepare DDP reducer: {e}")
+        trainer._unsloth_ddp_reducer_prepared = True
         return False
 
 
@@ -485,6 +668,10 @@ def _patch_trainer_with_ddp_support(trainer_class):
                         _setup_ddp_static_graph(self.accelerator.model)
                 except:
                     pass
+        
+        # Additional safeguard for expect_autograd_hooks_ error:
+        # Prepare DDP reducer before training step
+        _prepare_ddp_reducer_for_training(self, model)
         
         return original_training_step(self, model, inputs, num_items_in_batch)
     

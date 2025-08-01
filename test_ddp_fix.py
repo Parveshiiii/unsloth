@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script to validate DDP gradient checkpointing fix.
+Test script to validate enhanced DDP gradient checkpointing fix.
 
 Usage:
     # Single GPU test
@@ -15,7 +15,7 @@ import torch
 import torch.distributed as dist
 
 def test_ddp_static_graph_setup():
-    """Test that UnslothTrainer correctly sets up DDP static graph."""
+    """Test that UnslothTrainer correctly sets up DDP static graph and handles autograd hooks."""
     
     # Check if we're in a distributed environment
     is_distributed = (
@@ -100,7 +100,7 @@ def test_ddp_static_graph_setup():
             optim = "adamw_8bit",
             output_dir = "/tmp/test_ddp_output",
             # DDP specific settings
-            ddp_find_unused_parameters = False,
+            ddp_find_unused_parameters = False,  # Important for avoiding autograd hook errors
             report_to = [],  # Disable wandb/tensorboard logging
         ),
     )
@@ -116,6 +116,14 @@ def test_ddp_static_graph_setup():
         print(f"DDP static graph setup failed: {e}")
         return False
     
+    # Test reducer preparation
+    try:
+        trainer._prepare_ddp_reducer_for_training(trainer.model)
+        print("DDP reducer preparation completed without errors")
+    except Exception as e:
+        print(f"DDP reducer preparation failed: {e}")
+        return False
+    
     # Run a few training steps to test gradient checkpointing
     try:
         print("Starting training test...")
@@ -123,8 +131,12 @@ def test_ddp_static_graph_setup():
         print("Training completed successfully!")
         return True
     except RuntimeError as e:
-        if "Expected to mark a variable ready only once" in str(e):
-            print(f"DDP gradient checkpointing error still occurs: {e}")
+        error_msg = str(e)
+        if "Expected to mark a variable ready only once" in error_msg:
+            print(f"DDP 'parameter marked ready twice' error still occurs: {e}")
+            return False
+        elif "expect_autograd_hooks_" in error_msg:
+            print(f"DDP 'expect_autograd_hooks_' error still occurs: {e}")
             return False
         else:
             print(f"Different training error occurred: {e}")
@@ -137,7 +149,8 @@ if __name__ == "__main__":
     success = test_ddp_static_graph_setup()
     
     if success:
-        print("\n✅ Test PASSED: DDP gradient checkpointing fix works!")
+        print("\n✅ Test PASSED: Enhanced DDP gradient checkpointing fix works!")
+        print("Both 'parameter marked ready twice' and 'expect_autograd_hooks_' errors are handled.")
     else:
         print("\n❌ Test FAILED: DDP gradient checkpointing issue persists")
     
