@@ -127,22 +127,51 @@ class UnslothTrainer(SFTTrainer):
         super().__init__(*args, **kwargs)
         
         # Set up DDP static graph after model is initialized
-        _setup_ddp_static_graph(self.model)
+        self._setup_ddp_static_graph(self.model)
     
     def train(self, *args, **kwargs):
         """Override train to ensure DDP static graph is set up before training starts."""
         # Re-setup DDP static graph in case model wrapping happened after init
-        _setup_ddp_static_graph(self.model)
+        self._setup_ddp_static_graph(self.model)
         return super().train(*args, **kwargs)
     
     def training_step(self, model, inputs, num_items_in_batch=None):
         """Override training_step to handle DDP gradient checkpointing issues."""
         # Setup DDP static graph just before the first training step if not already done
-        if not hasattr(self, '_unsloth_ddp_static_graph_setup_done'):
-            _setup_ddp_static_graph(model)
-            self._unsloth_ddp_static_graph_setup_done = True
+        self._setup_ddp_static_graph_lazy(model)
         
         return super().training_step(model, inputs, num_items_in_batch)
+    
+    def _find_ddp_model(self, model):
+        """Recursively search for DDP-wrapped model in the model hierarchy."""
+        return _find_ddp_model(model)
+    
+    def _setup_ddp_static_graph(self, model):
+        """Setup DDP static graph to fix gradient checkpointing issues."""
+        return _setup_ddp_static_graph(model)
+    
+    def _setup_ddp_static_graph_lazy(self, model):
+        """Setup DDP static graph just before first training step if not already done."""
+        if not hasattr(self, '_unsloth_ddp_static_graph_setup_done'):
+            # Try multiple times with the latest model reference
+            # In case Accelerate wrapped the model after init
+            success = False
+            for model_ref in [model, getattr(self, 'model', None), getattr(self, 'accelerator', {}).get('model', None)]:
+                if model_ref is not None:
+                    if self._setup_ddp_static_graph(model_ref):
+                        success = True
+                        break
+            self._unsloth_ddp_static_graph_setup_done = True
+            
+            if not success:
+                # Last resort: try to find DDP model in accelerator
+                try:
+                    if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'model'):
+                        self._setup_ddp_static_graph(self.accelerator.model)
+                except:
+                    pass
+            return success
+        return True
     
     def create_optimizer(self):
         embedding_learning_rate = getattr(self.args, "embedding_learning_rate", None)
@@ -284,28 +313,70 @@ def _find_ddp_model(model):
     if isinstance(model, DDP):
         return model
     
-    # Check common attribute names where DDP models might be nested
-    for attr_name in ['module', 'model', 'base_model', '_modules', '_orig_mod']:
-        if hasattr(model, attr_name):
-            attr_value = getattr(model, attr_name)
-            if isinstance(attr_value, DDP):
-                return attr_value
-            # Recursive search for deeply nested models
-            elif hasattr(attr_value, '__dict__'):
-                found = _find_ddp_model(attr_value)
-                if found is not None:
-                    return found
+    # Track visited objects to avoid infinite recursion
+    visited = set()
     
-    # Check if the model has _modules dict (common in PyTorch modules)
-    if hasattr(model, '_modules') and isinstance(model._modules, dict):
-        for module in model._modules.values():
-            if isinstance(module, DDP):
-                return module
-            found = _find_ddp_model(module)
-            if found is not None:
-                return found
+    def _recursive_search(obj, depth=0, max_depth=10):
+        # Avoid infinite recursion
+        if depth > max_depth or id(obj) in visited:
+            return None
+        visited.add(id(obj))
+        
+        # Check if this object is a DDP model
+        if isinstance(obj, DDP):
+            return obj
+            
+        # Don't recurse into basic types
+        if not hasattr(obj, '__dict__') and not hasattr(obj, '__getattribute__'):
+            return None
+            
+        # Check common attribute names where DDP models might be nested
+        for attr_name in ['module', 'model', 'base_model', '_orig_mod', '_module', '_model']:
+            try:
+                if hasattr(obj, attr_name):
+                    attr_value = getattr(obj, attr_name)
+                    if isinstance(attr_value, DDP):
+                        return attr_value
+                    # Recursive search for deeply nested models
+                    found = _recursive_search(attr_value, depth + 1)
+                    if found is not None:
+                        return found
+            except (AttributeError, RuntimeError):
+                # Some attributes may not be accessible
+                continue
+        
+        # Check if the object has _modules dict (common in PyTorch modules)
+        try:
+            if hasattr(obj, '_modules') and isinstance(obj._modules, dict):
+                for module in obj._modules.values():
+                    if isinstance(module, DDP):
+                        return module
+                    found = _recursive_search(module, depth + 1)
+                    if found is not None:
+                        return found
+        except (AttributeError, RuntimeError):
+            pass
+        
+        # Check if the object has parameters (indicating it's a model-like object)
+        try:
+            if hasattr(obj, 'parameters') and callable(obj.parameters):
+                # This might be a wrapper around the actual model, check its attributes
+                for attr_name in dir(obj):
+                    if not attr_name.startswith('_') and attr_name not in ['parameters', 'named_parameters', 'modules', 'named_modules']:
+                        try:
+                            attr_value = getattr(obj, attr_name)
+                            if hasattr(attr_value, '__dict__') or hasattr(attr_value, '_modules'):
+                                found = _recursive_search(attr_value, depth + 1)
+                                if found is not None:
+                                    return found
+                        except (AttributeError, RuntimeError, TypeError):
+                            continue
+        except (AttributeError, RuntimeError):
+            pass
+        
+        return None
     
-    return None
+    return _recursive_search(model)
 
 
 def _setup_ddp_static_graph(model):
@@ -333,6 +404,11 @@ def _setup_ddp_static_graph(model):
         
         if ddp_model is not None:
             try:
+                # Check if static graph is already set
+                if hasattr(ddp_model, '_static_graph') and ddp_model._static_graph:
+                    # Already set, don't set again
+                    return True
+                    
                 # Enable static graph optimization for DDP
                 # This is safe for most fine-tuning scenarios where the computation graph is static
                 ddp_model._set_static_graph()
@@ -343,8 +419,11 @@ def _setup_ddp_static_graph(model):
                 print("Unsloth: This may cause 'parameter marked ready twice' errors in distributed training")
                 return False
         else:
-            print("Unsloth: Warning - Could not find DDP-wrapped model for static graph optimization")
-            print("Unsloth: If you encounter 'parameter marked ready twice' errors, this is the likely cause")
+            # Only print warning in distributed environment where we expect to find DDP
+            if (os.environ.get("LOCAL_RANK") is not None and 
+                os.environ.get("WORLD_SIZE") is not None):
+                print("Unsloth: Warning - Could not find DDP-wrapped model for static graph optimization")
+                print("Unsloth: If you encounter 'parameter marked ready twice' errors, this is the likely cause")
             return False
             
     except Exception as e:
@@ -383,8 +462,23 @@ def _patch_trainer_with_ddp_support(trainer_class):
         """Override training_step to handle DDP gradient checkpointing issues."""
         # Setup DDP static graph just before the first training step if not already done
         if not hasattr(self, '_unsloth_ddp_static_graph_setup_done'):
-            _setup_ddp_static_graph(model)
+            # Try multiple times with the latest model reference
+            # In case Accelerate wrapped the model after init
+            success = False
+            for model_ref in [model, getattr(self, 'model', None), getattr(self, 'accelerator', {}).get('model', None)]:
+                if model_ref is not None:
+                    if _setup_ddp_static_graph(model_ref):
+                        success = True
+                        break
             self._unsloth_ddp_static_graph_setup_done = True
+            
+            if not success:
+                # Last resort: try to find DDP model in accelerator
+                try:
+                    if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'model'):
+                        _setup_ddp_static_graph(self.accelerator.model)
+                except:
+                    pass
         
         return original_training_step(self, model, inputs, num_items_in_batch)
     
