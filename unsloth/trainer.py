@@ -36,6 +36,7 @@ __all__ = [
     "UnslothTrainer",
     "unsloth_train",
     "_patch_trl_trainer",
+    "_patch_trainer_with_ddp_support",
     "UnslothVisionDataCollator",
 ]
 
@@ -122,195 +123,26 @@ pass
 class UnslothTrainer(SFTTrainer):
     def __init__(self, *args, **kwargs):
         # Check for multi-GPU setup and initialize distributed training if needed
-        self._setup_distributed_training()
+        _setup_distributed_training()
         super().__init__(*args, **kwargs)
         
         # Set up DDP static graph after model is initialized
-        self._setup_ddp_static_graph()
-    
-    def _setup_distributed_training(self):
-        """Setup distributed training if in multi-GPU environment."""
-        import os
-        import torch
-        
-        # Get multi-GPU configuration
-        multi_gpu_config = get_multi_gpu_config()
-        
-        # Initialize distributed training if needed
-        if multi_gpu_config["enable_multi_gpu"]:
-            init_distributed_training_if_needed()
-        
-        # Check if we're in a distributed environment
-        if (os.environ.get("LOCAL_RANK") is not None or 
-            os.environ.get("WORLD_SIZE") is not None):
-            try:
-                import torch.distributed as dist
-                if not dist.is_initialized():
-                    # Initialize distributed training
-                    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-                    if torch.cuda.is_available():
-                        torch.cuda.set_device(local_rank)
-                    dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
-                    print(f"Unsloth: Initialized distributed training on rank {local_rank}")
-                    
-                    # Set up proper device mapping for this rank
-                    if torch.cuda.is_available():
-                        device = torch.device(f"cuda:{local_rank}")
-                        print(f"Unsloth: Using device {device} for rank {local_rank}")
-                    
-            except Exception as e:
-                print(f"Unsloth: Failed to initialize distributed training: {e}")
-                print("Unsloth: Falling back to single-GPU training")
-        elif multi_gpu_config["supports_multi_gpu"] and multi_gpu_config["enable_multi_gpu"]:
-            print(f"Unsloth: Multi-GPU setup detected ({multi_gpu_config['device_count']} GPUs) but not using distributed training")
-            print("Unsloth: For true distributed training, launch with: torchrun --nproc_per_node={} your_script.py".format(multi_gpu_config['device_count']))
-    
-    def _setup_ddp_static_graph(self):
-        """Setup DDP static graph to fix gradient checkpointing issues."""
-        import os
-        import torch
-        
-        # Allow users to disable the fix if needed
-        if os.environ.get("UNSLOTH_DISABLE_DDP_STATIC_GRAPH", "0") == "1":
-            print("Unsloth: DDP static graph optimization disabled by environment variable")
-            return
-        
-        # Only proceed if we're in a distributed environment
-        if not (os.environ.get("LOCAL_RANK") is not None or 
-                os.environ.get("WORLD_SIZE") is not None):
-            return
-        
-        try:
-            import torch.distributed as dist
-            if not dist.is_initialized():
-                return
-                
-            # Check if model is wrapped in DDP
-            from torch.nn.parallel import DistributedDataParallel as DDP
-            
-            # Find the DDP-wrapped model in the model hierarchy
-            model = self.model
-            ddp_model = None
-            
-            # Check if the model itself is DDP wrapped
-            if isinstance(model, DDP):
-                ddp_model = model
-            # Check if the model has a module that's DDP wrapped (common with Accelerate)
-            elif hasattr(model, 'module') and isinstance(model.module, DDP):
-                ddp_model = model.module
-            # Check deeper nesting (sometimes models are wrapped multiple times)
-            elif hasattr(model, 'model') and isinstance(model.model, DDP):
-                ddp_model = model.model
-            elif hasattr(model, 'base_model') and isinstance(model.base_model, DDP):
-                ddp_model = model.base_model
-            
-            if ddp_model is not None:
-                try:
-                    # Enable static graph optimization for DDP
-                    # This is safe for most fine-tuning scenarios where the computation graph is static
-                    ddp_model._set_static_graph()
-                    print("Unsloth: Enabled DDP static graph optimization to fix gradient checkpointing issues")
-                except Exception as e:
-                    print(f"Unsloth: Warning - Could not enable DDP static graph: {e}")
-                    print("Unsloth: This may cause issues with gradient checkpointing in distributed training")
-            else:
-                print("Unsloth: Warning - Could not find DDP-wrapped model to optimize")
-                
-        except Exception as e:
-            print(f"Unsloth: Warning - Could not setup DDP static graph: {e}")
+        _setup_ddp_static_graph(self.model)
     
     def train(self, *args, **kwargs):
         """Override train to ensure DDP static graph is set up before training starts."""
         # Re-setup DDP static graph in case model wrapping happened after init
-        self._setup_ddp_static_graph()
+        _setup_ddp_static_graph(self.model)
         return super().train(*args, **kwargs)
     
     def training_step(self, model, inputs, num_items_in_batch=None):
         """Override training_step to handle DDP gradient checkpointing issues."""
         # Setup DDP static graph just before the first training step if not already done
-        self._setup_ddp_static_graph_lazy(model)
+        if not hasattr(self, '_unsloth_ddp_static_graph_setup_done'):
+            _setup_ddp_static_graph(model)
+            self._unsloth_ddp_static_graph_setup_done = True
+        
         return super().training_step(model, inputs, num_items_in_batch)
-    
-    def _setup_ddp_static_graph_lazy(self, model):
-        """Lazy setup of DDP static graph - called just before training steps."""
-        if hasattr(self, '_ddp_static_graph_setup_done'):
-            return
-            
-        import os
-        import torch
-        
-        # Allow users to disable the fix if needed
-        if os.environ.get("UNSLOTH_DISABLE_DDP_STATIC_GRAPH", "0") == "1":
-            print("Unsloth: DDP static graph optimization disabled by environment variable")
-            self._ddp_static_graph_setup_done = True
-            return
-        
-        # Only proceed if we're in a distributed environment
-        if not (os.environ.get("LOCAL_RANK") is not None or 
-                os.environ.get("WORLD_SIZE") is not None):
-            self._ddp_static_graph_setup_done = True
-            return
-        
-        try:
-            import torch.distributed as dist
-            if not dist.is_initialized():
-                self._ddp_static_graph_setup_done = True
-                return
-                
-            # Check if model is wrapped in DDP
-            from torch.nn.parallel import DistributedDataParallel as DDP
-            
-            # Find the DDP-wrapped model - check multiple levels of nesting
-            ddp_model = self._find_ddp_model(model)
-            
-            if ddp_model is not None:
-                try:
-                    # Enable static graph optimization for DDP
-                    # This is safe for most fine-tuning scenarios where the computation graph is static
-                    ddp_model._set_static_graph()
-                    print("Unsloth: Enabled DDP static graph optimization to fix gradient checkpointing issues")
-                except Exception as e:
-                    print(f"Unsloth: Warning - Could not enable DDP static graph: {e}")
-                    print("Unsloth: This may cause 'parameter marked ready twice' errors in distributed training")
-            else:
-                print("Unsloth: Warning - Could not find DDP-wrapped model for static graph optimization")
-                print("Unsloth: If you encounter 'parameter marked ready twice' errors, this is the likely cause")
-                
-        except Exception as e:
-            print(f"Unsloth: Warning - Could not setup DDP static graph in lazy mode: {e}")
-        
-        self._ddp_static_graph_setup_done = True
-    
-    def _find_ddp_model(self, model):
-        """Recursively search for DDP-wrapped model in the model hierarchy."""
-        from torch.nn.parallel import DistributedDataParallel as DDP
-        
-        # Check current model
-        if isinstance(model, DDP):
-            return model
-        
-        # Check common attribute names where DDP models might be nested
-        for attr_name in ['module', 'model', 'base_model', '_modules', '_orig_mod']:
-            if hasattr(model, attr_name):
-                attr_value = getattr(model, attr_name)
-                if isinstance(attr_value, DDP):
-                    return attr_value
-                # Recursive search for deeply nested models
-                elif hasattr(attr_value, '__dict__'):
-                    found = self._find_ddp_model(attr_value)
-                    if found is not None:
-                        return found
-        
-        # Check if the model has _modules dict (common in PyTorch modules)
-        if hasattr(model, '_modules') and isinstance(model._modules, dict):
-            for module in model._modules.values():
-                if isinstance(module, DDP):
-                    return module
-                found = self._find_ddp_model(module)
-                if found is not None:
-                    return found
-        
-        return None
     
     def create_optimizer(self):
         embedding_learning_rate = getattr(self.args, "embedding_learning_rate", None)
@@ -405,6 +237,165 @@ def _backwards_compatible_trainer(trainer_class, config_class):
 pass
 
 
+# Standalone DDP functions that can be used to patch any trainer
+def _setup_distributed_training():
+    """Setup distributed training if in multi-GPU environment."""
+    import os
+    import torch
+    
+    # Get multi-GPU configuration
+    multi_gpu_config = get_multi_gpu_config()
+    
+    # Initialize distributed training if needed
+    if multi_gpu_config["enable_multi_gpu"]:
+        init_distributed_training_if_needed()
+    
+    # Check if we're in a distributed environment
+    if (os.environ.get("LOCAL_RANK") is not None or 
+        os.environ.get("WORLD_SIZE") is not None):
+        try:
+            import torch.distributed as dist
+            if not dist.is_initialized():
+                # Initialize distributed training
+                local_rank = int(os.environ.get("LOCAL_RANK", 0))
+                if torch.cuda.is_available():
+                    torch.cuda.set_device(local_rank)
+                dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+                print(f"Unsloth: Initialized distributed training on rank {local_rank}")
+                
+                # Set up proper device mapping for this rank
+                if torch.cuda.is_available():
+                    device = torch.device(f"cuda:{local_rank}")
+                    print(f"Unsloth: Using device {device} for rank {local_rank}")
+                
+        except Exception as e:
+            print(f"Unsloth: Failed to initialize distributed training: {e}")
+            print("Unsloth: Falling back to single-GPU training")
+    elif multi_gpu_config["supports_multi_gpu"] and multi_gpu_config["enable_multi_gpu"]:
+        print(f"Unsloth: Multi-GPU setup detected ({multi_gpu_config['device_count']} GPUs) but not using distributed training")
+        print("Unsloth: For true distributed training, launch with: torchrun --nproc_per_node={} your_script.py".format(multi_gpu_config['device_count']))
+
+
+def _find_ddp_model(model):
+    """Recursively search for DDP-wrapped model in the model hierarchy."""
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    
+    # Check current model
+    if isinstance(model, DDP):
+        return model
+    
+    # Check common attribute names where DDP models might be nested
+    for attr_name in ['module', 'model', 'base_model', '_modules', '_orig_mod']:
+        if hasattr(model, attr_name):
+            attr_value = getattr(model, attr_name)
+            if isinstance(attr_value, DDP):
+                return attr_value
+            # Recursive search for deeply nested models
+            elif hasattr(attr_value, '__dict__'):
+                found = _find_ddp_model(attr_value)
+                if found is not None:
+                    return found
+    
+    # Check if the model has _modules dict (common in PyTorch modules)
+    if hasattr(model, '_modules') and isinstance(model._modules, dict):
+        for module in model._modules.values():
+            if isinstance(module, DDP):
+                return module
+            found = _find_ddp_model(module)
+            if found is not None:
+                return found
+    
+    return None
+
+
+def _setup_ddp_static_graph(model):
+    """Setup DDP static graph to fix gradient checkpointing issues."""
+    import os
+    import torch
+    
+    # Allow users to disable the fix if needed
+    if os.environ.get("UNSLOTH_DISABLE_DDP_STATIC_GRAPH", "0") == "1":
+        print("Unsloth: DDP static graph optimization disabled by environment variable")
+        return False
+    
+    # Only proceed if we're in a distributed environment
+    if not (os.environ.get("LOCAL_RANK") is not None or 
+            os.environ.get("WORLD_SIZE") is not None):
+        return False
+    
+    try:
+        import torch.distributed as dist
+        if not dist.is_initialized():
+            return False
+            
+        # Find the DDP-wrapped model - check multiple levels of nesting
+        ddp_model = _find_ddp_model(model)
+        
+        if ddp_model is not None:
+            try:
+                # Enable static graph optimization for DDP
+                # This is safe for most fine-tuning scenarios where the computation graph is static
+                ddp_model._set_static_graph()
+                print("Unsloth: Enabled DDP static graph optimization to fix gradient checkpointing issues")
+                return True
+            except Exception as e:
+                print(f"Unsloth: Warning - Could not enable DDP static graph: {e}")
+                print("Unsloth: This may cause 'parameter marked ready twice' errors in distributed training")
+                return False
+        else:
+            print("Unsloth: Warning - Could not find DDP-wrapped model for static graph optimization")
+            print("Unsloth: If you encounter 'parameter marked ready twice' errors, this is the likely cause")
+            return False
+            
+    except Exception as e:
+        print(f"Unsloth: Warning - Could not setup DDP static graph: {e}")
+        return False
+
+
+def _patch_trainer_with_ddp_support(trainer_class):
+    """Add DDP support to any trainer class by patching its methods."""
+    original_init = trainer_class.__init__
+    original_train = trainer_class.train
+    original_training_step = trainer_class.training_step
+    
+    @wraps(original_init)
+    def new_init(self, *args, **kwargs):
+        # Setup distributed training before model initialization
+        _setup_distributed_training()
+        
+        # Call original init
+        original_init(self, *args, **kwargs)
+        
+        # Setup DDP static graph after model is initialized
+        if hasattr(self, 'model'):
+            _setup_ddp_static_graph(self.model)
+    
+    @wraps(original_train)
+    def new_train(self, *args, **kwargs):
+        """Override train to ensure DDP static graph is set up before training starts."""
+        # Re-setup DDP static graph in case model wrapping happened after init
+        if hasattr(self, 'model'):
+            _setup_ddp_static_graph(self.model)
+        return original_train(self, *args, **kwargs)
+    
+    @wraps(original_training_step)
+    def new_training_step(self, model, inputs, num_items_in_batch=None):
+        """Override training_step to handle DDP gradient checkpointing issues."""
+        # Setup DDP static graph just before the first training step if not already done
+        if not hasattr(self, '_unsloth_ddp_static_graph_setup_done'):
+            _setup_ddp_static_graph(model)
+            self._unsloth_ddp_static_graph_setup_done = True
+        
+        return original_training_step(self, model, inputs, num_items_in_batch)
+    
+    # Apply the patches
+    trainer_class.__init__ = new_init
+    trainer_class.train = new_train
+    trainer_class.training_step = new_training_step
+    
+    return trainer_class
+
+
 def _patch_trl_trainer():
     import trl
     if hasattr(trl, "__UNSLOTH_BACKWARDS_COMPATIBLE__"): return
@@ -417,7 +408,14 @@ def _patch_trl_trainer():
     trl_classes = list(trl_trainers & trl_configs)
 
     for x in trl_classes:
-        try:    exec(f"trl.{x}Trainer.__init__ = _backwards_compatible_trainer(trl.{x}Trainer, trl.{x}Config)", globals())
+        try:    
+            # Apply backwards compatibility patch
+            exec(f"trl.{x}Trainer.__init__ = _backwards_compatible_trainer(trl.{x}Trainer, trl.{x}Config)", globals())
+            
+            # Apply DDP support patch
+            trainer_class = getattr(trl, f"{x}Trainer")
+            _patch_trainer_with_ddp_support(trainer_class)
+            
         except: continue
     pass
 
