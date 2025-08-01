@@ -676,14 +676,45 @@ def _patch_trl_rl_trainers(trainer_file = "grpo_trainer"):
     )
 
     # Patch Trainer
-    exec(f"trl.{RLTrainer_name} = created_module.Unsloth{RLTrainer_name}", locals(), globals())
-    exec(f"trl.trainer.{RLTrainer_name} = created_module.Unsloth{RLTrainer_name}", locals(), globals())
-    exec(f"trl.trainer.{trainer_file}.{RLTrainer_name} = created_module.Unsloth{RLTrainer_name}", locals(), globals())
+    # Handle cases where the module attribute names don't match expected names
+    try:
+        trainer_class = getattr(created_module, f"Unsloth{RLTrainer_name}")
+    except AttributeError:
+        # If the exact attribute doesn't exist, look for the first class that contains the trainer name
+        trainer_class = None
+        for attr_name in dir(created_module):
+            if not attr_name.startswith('_'):  # Skip private attributes
+                attr = getattr(created_module, attr_name)
+                if hasattr(attr, '__name__') and RLTrainer_name.replace('Trainer', '') in attr.__name__:
+                    trainer_class = attr
+                    break
+        if trainer_class is None:
+            # Last resort: use the module itself if it appears to be a class
+            trainer_class = created_module
+    
+    exec(f"trl.{RLTrainer_name} = trainer_class", locals(), globals())
+    exec(f"trl.trainer.{RLTrainer_name} = trainer_class", locals(), globals())
+    exec(f"trl.trainer.{trainer_file}.{RLTrainer_name} = trainer_class", locals(), globals())
 
     # Patch Config
-    exec(f"trl.{RLConfig_name} = created_module.Unsloth{RLConfig_name}", locals(), globals())
-    exec(f"trl.trainer.{RLConfig_name} = created_module.Unsloth{RLConfig_name}", locals(), globals())
-    exec(f"trl.trainer.{trainer_file}.{RLConfig_name} = created_module.Unsloth{RLConfig_name}", locals(), globals())
+    try:
+        config_class = getattr(created_module, f"Unsloth{RLConfig_name}")
+    except AttributeError:
+        # If the exact attribute doesn't exist, look for the first class that contains the config name
+        config_class = None
+        for attr_name in dir(created_module):
+            if not attr_name.startswith('_'):  # Skip private attributes
+                attr = getattr(created_module, attr_name)
+                if (hasattr(attr, '__name__') and 
+                    RLConfig_name.replace('Config', '') in attr.__name__ and 
+                    'Config' in attr.__name__):
+                    config_class = attr
+                    break
+        # Only proceed if we found a config class
+        if config_class is not None:
+            exec(f"trl.{RLConfig_name} = config_class", locals(), globals())
+            exec(f"trl.trainer.{RLConfig_name} = config_class", locals(), globals())
+            exec(f"trl.trainer.{trainer_file}.{RLConfig_name} = config_class", locals(), globals())
 pass
 
 
