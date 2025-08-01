@@ -69,7 +69,7 @@ model = FastLanguageModel.get_peft_model(
     use_gradient_checkpointing="unsloth",
 )
 
-# Train with standard SFTTrainer
+# Train with SFTTrainer (automatically gets DDP support when unsloth is imported)
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
@@ -121,8 +121,9 @@ model = FastLanguageModel.get_peft_model(
     use_gradient_checkpointing="unsloth",
 )
 
-# Use UnslothTrainer for distributed training
-trainer = UnslothTrainer(
+# Use SFTTrainer - automatically gets DDP support when unsloth is imported
+# Or use UnslothTrainer explicitly if preferred
+trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
     train_dataset=dataset,
@@ -157,11 +158,13 @@ trainer.train()
 
 ## Training Modes Comparison
 
-| Mode | Use Case | Memory | Speed | Setup |
-|------|----------|---------|-------|-------|
-| Single-GPU | Small models, limited hardware | Low | Baseline | Default |
-| Single-Process Multi-GPU | Medium models, inference | Medium | 1.5-2x | `device_map="auto"` |
-| Distributed (DDP) | Large models, maximum speed | High | 2-4x | `torchrun` |
+| Mode | Use Case | Memory | Speed | Setup | Trainer |
+|------|----------|---------|-------|-------|---------|
+| Single-GPU | Small models, limited hardware | Low | Baseline | Default | `SFTTrainer` |
+| Single-Process Multi-GPU | Medium models, inference | Medium | 1.5-2x | `device_map="auto"` | `SFTTrainer` (auto-patched) |
+| Distributed (DDP) | Large models, maximum speed | High | 2-4x | `torchrun` | `SFTTrainer` (auto-patched) or `UnslothTrainer` |
+
+**Note**: When you import unsloth, `SFTTrainer` is automatically patched with DDP support to avoid gradient checkpointing issues.
 
 ## Performance Tips
 
@@ -226,6 +229,48 @@ import torch.distributed as dist
 print(f'Rank: {dist.get_rank()}, World Size: {dist.get_world_size()}')
 "
 ```
+
+### DDP Gradient Checkpointing Issues (FIXED)
+
+**Issue**: When using distributed training with gradient checkpointing, you might encounter:
+```
+RuntimeError: Expected to mark a variable ready only once. 
+Parameter base_model.model.model.layers.X.mlp.gate_proj.lora_A.default.weight has been marked as ready twice.
+```
+
+**Solution**: Import unsloth before using SFTTrainer (automatic fix) or use UnslothTrainer explicitly:
+
+```python
+# ✅ Option 1: Automatic fix (recommended)
+import unsloth  # This patches SFTTrainer automatically
+from trl import SFTTrainer
+trainer = SFTTrainer(...)
+
+# ✅ Option 2: Explicit UnslothTrainer usage
+from unsloth import UnslothTrainer
+trainer = UnslothTrainer(...)
+
+# ❌ This can cause DDP issues:
+from trl import SFTTrainer  # Without importing unsloth first
+trainer = SFTTrainer(...)
+```
+
+**Technical Details**: 
+- When unsloth is imported, `SFTTrainer` is automatically patched with DDP static graph optimization
+- This tells PyTorch that the model structure doesn't change during training
+- Safe for fine-tuning scenarios and improves DDP performance
+- Can be disabled with `UNSLOTH_DISABLE_DDP_STATIC_GRAPH=1` if needed
+
+**Test the fix**:
+```bash
+# Run the included test
+python test_ddp_fix.py
+
+# Test with multiple GPUs
+torchrun --nproc_per_node=2 test_ddp_fix.py
+```
+
+For more details, see `DDP_GRADIENT_CHECKPOINTING_FIX.md`.
 
 ## Examples
 

@@ -56,10 +56,25 @@ from .flex_attention import (
 
 import os
 if "UNSLOTH_ZOO_IS_PRESENT" not in os.environ:
-    try:
-        print("🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.")
-    except:
-        print("Unsloth: Will patch your computer to enable 2x faster free finetuning.")
+    # Check if we're in distributed training environment
+    is_distributed = (
+        os.environ.get("LOCAL_RANK") is not None or
+        os.environ.get("WORLD_SIZE") is not None or
+        os.environ.get("RANK") is not None
+    )
+    
+    if is_distributed:
+        world_size = os.environ.get("WORLD_SIZE", "1")
+        local_rank = os.environ.get("LOCAL_RANK", "0")
+        try:
+            print(f"🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning (Distributed Training: Rank {local_rank}/{world_size}).")
+        except:
+            print(f"Unsloth: Will patch your computer to enable 2x faster free finetuning (Distributed Training: Rank {local_rank}/{world_size}).")
+    else:
+        try:
+            print("🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.")
+        except:
+            print("Unsloth: Will patch your computer to enable 2x faster free finetuning.")
     pass
 pass
 del os

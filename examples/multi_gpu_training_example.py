@@ -3,6 +3,9 @@
 Example script demonstrating Unsloth multi-GPU training.
 
 This script shows how to use Unsloth with multiple GPUs for distributed training.
+
+NEW: SFTTrainer is now automatically patched with DDP support when you import unsloth.
+No need to switch to UnslothTrainer - just import unsloth and use SFTTrainer as normal!
 """
 
 # Example 0: Auto-detection multi-GPU training (NEW - improved auto-detection)
@@ -95,7 +98,8 @@ def example_single_process_multi_gpu():
     # Dataset
     dataset = load_dataset("alpaca", split = "train")
     
-    # Training
+    # Training - SFTTrainer is automatically patched with DDP support when unsloth is imported
+    from trl import SFTTrainer
     trainer = SFTTrainer(
         model = model,
         tokenizer = tokenizer,
@@ -118,6 +122,8 @@ def example_single_process_multi_gpu():
             lr_scheduler_type = "linear",
             seed = 3407,
             output_dir = "outputs",
+            # DDP specific settings for better distributed training
+            ddp_find_unused_parameters = False,
         ),
     )
     
@@ -165,8 +171,10 @@ model = FastLanguageModel.get_peft_model(
     random_state = 3407,
 )
 
-# Use UnslothTrainer which has built-in distributed training support
-trainer = UnslothTrainer(
+# Use SFTTrainer - it's automatically patched with DDP support when unsloth is imported
+# Alternatively, you can use UnslothTrainer explicitly for the same functionality
+from trl import SFTTrainer
+trainer = SFTTrainer(
     model = model,
     tokenizer = tokenizer,
     train_dataset = your_dataset,

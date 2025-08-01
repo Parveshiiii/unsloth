@@ -1861,9 +1861,23 @@ class FastLlamaModel:
 
         max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
 
+        # Get distributed training information
+        is_distributed = (
+            os.environ.get("LOCAL_RANK") is not None or
+            os.environ.get("WORLD_SIZE") is not None or
+            os.environ.get("RANK") is not None
+        )
+        
+        if is_distributed:
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            local_rank = os.environ.get("LOCAL_RANK", "0")
+            gpu_info = f"Num GPUs = {DEVICE_COUNT} (Distributed: Using {world_size} GPUs across nodes, Local Rank: {local_rank})"
+        else:
+            gpu_info = f"Num GPUs = {DEVICE_COUNT}"
+
         statistics = \
         f"==((====))==  Unsloth {__version__}: Fast {model_patcher.__name__[4:-5]} patching. Transformers: {transformers_version}.{vllm_version}\n"\
-        f"   {chr(92)}{chr(92)}   /|    {gpu_stats.name}. Num GPUs = {DEVICE_COUNT}. Max memory: {max_memory} GB. Platform: {platform_system}.\n"\
+        f"   {chr(92)}{chr(92)}   /|    {gpu_stats.name}. {gpu_info}. Max memory: {max_memory} GB. Platform: {platform_system}.\n"\
         f"O^O/ {chr(92)}_/ {chr(92)}    Torch: {torch.__version__}. {gpu_stats_snippet} Triton: {triton_version}\n"\
         f"{chr(92)}        /    Bfloat16 = {str(SUPPORTS_BFLOAT16).upper()}. FA [Xformers = {xformers_version}. FA2 = {HAS_FLASH_ATTENTION}]\n"\
         f' "-____-"     Free license: http://github.com/unslothai/unsloth'
