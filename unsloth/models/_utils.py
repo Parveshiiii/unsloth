@@ -67,6 +67,10 @@ __all__ = [
     "patch_fast_lora",
     "validate_loftq_config",
     "RaiseUninitialized",
+    
+    # Multi-GPU support
+    "get_multi_gpu_config",
+    "get_optimal_device_map",
 ]
 
 import torch
@@ -79,6 +83,41 @@ import re
 import warnings, subprocess, re, inspect, psutil, os, math
 from unsloth_zoo.utils import Version
 from unsloth import DEVICE_TYPE, DEVICE_COUNT
+
+# Multi-GPU support utilities
+def get_multi_gpu_config():
+    """Get multi-GPU configuration based on environment variables and device count."""
+    enable_multi_gpu = os.environ.get("UNSLOTH_ENABLE_MULTIGPU", "0") == "1"
+    is_distributed = (
+        os.environ.get("LOCAL_RANK") is not None or
+        os.environ.get("WORLD_SIZE") is not None or
+        os.environ.get("RANK") is not None
+    )
+    
+    return {
+        "enable_multi_gpu": enable_multi_gpu,
+        "is_distributed": is_distributed,
+        "device_count": DEVICE_COUNT,
+        "supports_multi_gpu": DEVICE_COUNT > 1 and DEVICE_TYPE == "cuda"
+    }
+
+def get_optimal_device_map(model_config=None, enable_multi_gpu=False):
+    """Get optimal device map for model loading."""
+    multi_gpu_config = get_multi_gpu_config()
+    
+    if not enable_multi_gpu or not multi_gpu_config["supports_multi_gpu"]:
+        return "sequential"
+    
+    if multi_gpu_config["is_distributed"]:
+        # In distributed training, each process handles one device
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        return f"cuda:{local_rank}"
+    
+    if multi_gpu_config["device_count"] > 1:
+        # Use auto device mapping for multi-GPU single-process training
+        return "auto"
+    
+    return "sequential"
 
 from unsloth_zoo.tokenizer_utils import (
     patch_tokenizer as _patch_tokenizer,

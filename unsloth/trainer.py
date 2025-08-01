@@ -119,6 +119,29 @@ pass
 
 
 class UnslothTrainer(SFTTrainer):
+    def __init__(self, *args, **kwargs):
+        # Check for multi-GPU setup and initialize distributed training if needed
+        self._setup_distributed_training()
+        super().__init__(*args, **kwargs)
+    
+    def _setup_distributed_training(self):
+        """Setup distributed training if in multi-GPU environment."""
+        import os
+        
+        # Check if we're in a distributed environment
+        if (os.environ.get("LOCAL_RANK") is not None or 
+            os.environ.get("WORLD_SIZE") is not None):
+            try:
+                import torch.distributed as dist
+                if not dist.is_initialized():
+                    # Initialize distributed training
+                    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+                    torch.cuda.set_device(local_rank)
+                    dist.init_process_group(backend="nccl")
+                    print(f"Unsloth: Initialized distributed training on rank {local_rank}")
+            except Exception as e:
+                print(f"Unsloth: Failed to initialize distributed training: {e}")
+    
     def create_optimizer(self):
         embedding_learning_rate = getattr(self.args, "embedding_learning_rate", None)
         if embedding_learning_rate is None: return super().create_optimizer()

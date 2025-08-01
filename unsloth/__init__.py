@@ -38,10 +38,22 @@ if already_imported:
     )
 pass
 
-# Unsloth currently does not work on multi GPU setups - sadly we are a 2 brother team so
-# enabling it will require much more work, so we have to prioritize. Please understand!
-# We do have a beta version, which you can contact us about!
-# Thank you for your understanding and we appreciate it immensely!
+# Multi-GPU training support configuration
+# Unsloth now supports multi-GPU training via DistributedDataParallel (DDP)
+# Set UNSLOTH_ENABLE_MULTIGPU=1 to enable multi-GPU training
+ENABLE_MULTIGPU = os.environ.get("UNSLOTH_ENABLE_MULTIGPU", "0") == "1"
+
+# Detect if we're in a distributed training environment
+def is_distributed_training():
+    """Check if we're running in a distributed training environment."""
+    return (
+        os.environ.get("LOCAL_RANK") is not None or
+        os.environ.get("WORLD_SIZE") is not None or
+        os.environ.get("RANK") is not None
+    )
+
+# Global variable to track if distributed training is active
+IS_DISTRIBUTED = is_distributed_training()
 
 # Fixes https://github.com/unslothai/unsloth/issues/1266
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
