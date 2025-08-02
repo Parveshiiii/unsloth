@@ -44,7 +44,7 @@ model = FastLanguageModel.get_peft_model(
     lora_alpha = 32,  # Best to choose alpha = rank or rank*2
     lora_dropout = 0, # Supports any, but = 0 is optimized
     bias = "none",    # Supports any, but = "none" is optimized
-    use_gradient_checkpointing = "True", # True or "unsloth" for very long context
+    use_gradient_checkpointing = True, # True or "unsloth" for very long context
     random_state = 3407,
     use_rslora = False,   # We support rank stabilized LoRA
     loftq_config = None,  # And LoftQ
