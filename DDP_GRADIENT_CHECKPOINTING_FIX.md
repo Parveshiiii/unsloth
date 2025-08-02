@@ -15,6 +15,8 @@ Parameter at index 498 with name base_model.model.model.layers.35.mlp.gate_proj.
 RuntimeError: expect_autograd_hooks_ INTERNAL ASSERT FAILED at "/pytorch/torch/csrc/distributed/c10d/reducer.cpp":1633, please report a bug to PyTorch.
 ```
 
+This error occurs during the backward pass when DDP's autograd hook management becomes inconsistent with the actual model state.
+
 ## Root Cause
 
 These errors occur because:
@@ -26,6 +28,8 @@ These errors occur because:
 3. **Autograd Hook Conflicts**: DDP relies on autograd hooks to track parameter usage, but gradient checkpointing can interfere with the normal hook registration and execution process.
 
 4. **Conflict**: When gradient checkpointing re-runs the forward pass during backward, it can cause the same LoRA parameters to be "used" multiple times, violating DDP's expectation that each parameter is marked ready exactly once per iteration.
+
+5. **Autograd Hook Initialization**: The `expect_autograd_hooks_` error specifically occurs when DDP's reducer has not properly initialized its autograd hooks before the first backward pass, often due to lazy initialization conflicts with gradient checkpointing.
 
 ## Solution
 
@@ -42,16 +46,25 @@ def _setup_ddp_static_graph(self):
 
 The `_set_static_graph()` method tells DDP that the computation graph structure is static (doesn't change between iterations), which is true for most fine-tuning scenarios. This allows DDP to optimize its parameter tracking and handle gradient checkpointing correctly.
 
-### 2. DDP Reducer Preparation
+### 2. Enhanced DDP Reducer Preparation
 
 ```python
 def _prepare_ddp_reducer_for_training(self):
     """Prepare DDP reducer to avoid expect_autograd_hooks_ errors."""
-    # Force DDP reducer initialization and autograd hook setup
-    reducer._rebuild_buckets()
+    # Enhanced three-part initialization:
+    # 1. Dummy forward pass to trigger autograd hook registration
+    # 2. Force reducer bucket rebuilding
+    # 3. Reset autograd hook state to ensure consistency
 ```
 
-This ensures that DDP's internal reducer component is properly initialized with all necessary autograd hooks before the first training step, preventing internal assertion failures.
+**Key Enhancement**: The fix now includes a **dummy forward pass** that forces DDP to fully initialize its autograd hooks before the first real training step. This is crucial for preventing the `expect_autograd_hooks_` error because:
+
+- DDP's autograd hooks are initialized lazily during the first forward pass
+- Gradient checkpointing can interfere with this lazy initialization
+- By running a dummy forward pass first, we ensure all hooks are properly registered
+- The reducer's internal state (like `next_bucket`) is reset to ensure consistency
+
+This enhanced preparation specifically addresses the internal assertion failure in PyTorch's DDP reducer.
 
 ### 3. Enhanced Parameter Validation
 
@@ -77,11 +90,15 @@ Models can be wrapped in multiple layers (PEFT, Accelerate, DDP), so we recursiv
 def training_step(self, model, inputs, num_items_in_batch=None):
     """Override training_step to handle DDP gradient checkpointing issues."""
     self._setup_ddp_static_graph_lazy(model)
-    self._prepare_ddp_reducer_for_training(model)
+    self._prepare_ddp_reducer_for_training(model)  # Enhanced autograd hooks preparation
     return super().training_step(model, inputs, num_items_in_batch)
 ```
 
-The DDP setup is performed lazily just before the first training step, ensuring that all model wrapping (by Accelerate, PEFT, etc.) has been completed. Additionally, the reducer is properly prepared to prevent autograd hook errors.
+The enhanced DDP setup is performed lazily just before the first training step, ensuring that all model wrapping (by Accelerate, PEFT, etc.) has been completed. The reducer preparation now includes:
+
+1. **Dummy Forward Pass**: Triggers complete DDP autograd hook initialization
+2. **Reducer State Reset**: Resets internal counters to prevent hook conflicts  
+3. **Parameter Validation**: Ensures all trainable parameters are properly registered
 
 ## Usage
 
@@ -161,15 +178,20 @@ The fix is safe because:
 
 ## Testing
 
-Run the test script to validate the fix:
+Run the test script to validate the enhanced fix:
 
 ```bash
 # Single GPU test
-python test_ddp_fix.py
+python test_ddp_autograd_hooks_fix.py
 
 # Multi-GPU DDP test  
-torchrun --nproc_per_node=2 test_ddp_fix.py
+torchrun --nproc_per_node=2 test_ddp_autograd_hooks_fix.py
 ```
+
+The enhanced test specifically validates that the `expect_autograd_hooks_` error is resolved by checking:
+- Dummy forward pass initialization
+- Autograd hook state consistency
+- Successful training without DDP reducer errors
 
 ## References
 
