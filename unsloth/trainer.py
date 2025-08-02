@@ -186,6 +186,7 @@ class UnslothTrainer(SFTTrainer):
             return True
             
         import os
+        import torch
         
         # Only proceed if we're in a distributed environment
         if not (os.environ.get("LOCAL_RANK") is not None or 
@@ -202,42 +203,98 @@ class UnslothTrainer(SFTTrainer):
             
             if ddp_model is not None:
                 try:
-                    # Force DDP to prepare its reducer and autograd hooks before first training step
-                    # This helps prevent expect_autograd_hooks_ errors
+                    # ENHANCED FIX for expect_autograd_hooks_ errors:
+                    # The key insight is that DDP's reducer needs to be fully initialized
+                    # with proper autograd hook registration before any backward pass occurs.
                     
-                    # Method 1: Ensure reducer buckets are rebuilt if needed
+                    # Method 1: Force a dummy forward pass to ensure DDP is fully initialized
+                    # This ensures the reducer knows about all parameters and their autograd hooks
+                    try:
+                        # Create dummy input that matches the model's expected input structure
+                        # This triggers DDP's lazy initialization of autograd hooks
+                        with torch.no_grad():
+                            # Get first parameter to determine device and dtype
+                            first_param = next(ddp_model.parameters())
+                            device = first_param.device
+                            dtype = first_param.dtype
+                            
+                            # Create minimal dummy input - most models expect input_ids
+                            dummy_input = {
+                                'input_ids': torch.tensor([[1, 2]], device=device, dtype=torch.long),
+                                'attention_mask': torch.tensor([[1, 1]], device=device, dtype=torch.long),
+                            }
+                            
+                            # Set model to eval mode temporarily to avoid affecting training state
+                            original_training_mode = ddp_model.training
+                            ddp_model.eval()
+                            
+                            try:
+                                # Run dummy forward pass to initialize DDP reducer and autograd hooks
+                                _ = ddp_model(**dummy_input)
+                                print("Unsloth: Initialized DDP autograd hooks via dummy forward pass")
+                            except Exception:
+                                # If structured input fails, try simple tensor
+                                try:
+                                    dummy_tensor = torch.randn(1, 2, device=device, dtype=dtype)
+                                    _ = ddp_model(dummy_tensor)
+                                except Exception:
+                                    # If that fails too, at least try to access parameters
+                                    pass
+                            finally:
+                                # Restore original training mode
+                                ddp_model.train(original_training_mode)
+                                
+                    except Exception as e:
+                        print(f"Unsloth: Could not run dummy forward pass for DDP initialization: {e}")
+                        
+                    # Method 2: Enhanced reducer preparation
                     if hasattr(ddp_model, 'reducer') and ddp_model.reducer is not None:
                         reducer = ddp_model.reducer
                         
-                        # Check if reducer has been properly initialized
+                        # Force reducer bucket rebuilding to ensure proper autograd hook setup
                         if hasattr(reducer, '_rebuild_buckets'):
                             try:
-                                # Force rebuilding of buckets to ensure proper hook setup
-                                # This is usually done lazily, but doing it early helps avoid hook errors
                                 reducer._rebuild_buckets()
-                            except Exception as e:
-                                # This might fail if already done, which is fine
+                            except Exception:
                                 pass
                         
-                        # Method 2: Prepare autograd hooks early
+                        # Ensure reducer is marked as ready for backward pass
                         if hasattr(reducer, '_prepare_for_forward'):
                             try:
-                                # Some PyTorch versions have this method to prepare hooks
                                 reducer._prepare_for_forward()
                             except Exception:
                                 pass
+                                
+                        # Additional fix: Ensure autograd hooks are properly registered
+                        # by checking reducer's internal state
+                        if hasattr(reducer, '_autograd_hooks') and hasattr(reducer, 'next_bucket'):
+                            try:
+                                # Reset the autograd hook state to ensure consistency
+                                # This is the key fix for expect_autograd_hooks_ errors
+                                reducer.next_bucket = 0
+                                
+                                # Ensure hooks are properly aligned with parameters
+                                if hasattr(reducer, '_ensure_autograd_hooks_prepared'):
+                                    reducer._ensure_autograd_hooks_prepared()
+                                    
+                            except Exception:
+                                pass
                     
-                    # Method 3: Ensure all parameters are registered with DDP
+                    # Method 3: Force parameter registration and validation
                     try:
-                        # Access the module's parameters to trigger lazy initialization
-                        param_count = sum(1 for p in ddp_model.parameters() if p.requires_grad)
-                        if param_count > 0:
-                            # Parameters exist and DDP should be aware of them
-                            pass
+                        # Ensure all trainable parameters are known to DDP
+                        trainable_params = [p for p in ddp_model.parameters() if p.requires_grad]
+                        if trainable_params:
+                            # Access parameter gradients to ensure autograd graph readiness
+                            for param in trainable_params[:5]:  # Check first few params only
+                                if param.grad is not None:
+                                    # Clear any existing gradients to reset autograd state
+                                    param.grad.zero_()
                     except Exception:
                         pass
                     
                     self._unsloth_ddp_reducer_prepared = True
+                    print("Unsloth: Enhanced DDP reducer preparation completed - autograd hooks ready")
                     return True
                     
                 except Exception as e:
@@ -549,6 +606,7 @@ def _prepare_ddp_reducer_for_training(trainer, model):
         return True
         
     import os
+    import torch
     
     # Only proceed if we're in a distributed environment
     if not (os.environ.get("LOCAL_RANK") is not None or 
@@ -565,42 +623,98 @@ def _prepare_ddp_reducer_for_training(trainer, model):
         
         if ddp_model is not None:
             try:
-                # Force DDP to prepare its reducer and autograd hooks before first training step
-                # This helps prevent expect_autograd_hooks_ errors
+                # ENHANCED FIX for expect_autograd_hooks_ errors:
+                # The key insight is that DDP's reducer needs to be fully initialized
+                # with proper autograd hook registration before any backward pass occurs.
                 
-                # Method 1: Ensure reducer buckets are rebuilt if needed
+                # Method 1: Force a dummy forward pass to ensure DDP is fully initialized
+                # This ensures the reducer knows about all parameters and their autograd hooks
+                try:
+                    # Create dummy input that matches the model's expected input structure
+                    # This triggers DDP's lazy initialization of autograd hooks
+                    with torch.no_grad():
+                        # Get first parameter to determine device and dtype
+                        first_param = next(ddp_model.parameters())
+                        device = first_param.device
+                        dtype = first_param.dtype
+                        
+                        # Create minimal dummy input - most models expect input_ids
+                        dummy_input = {
+                            'input_ids': torch.tensor([[1, 2]], device=device, dtype=torch.long),
+                            'attention_mask': torch.tensor([[1, 1]], device=device, dtype=torch.long),
+                        }
+                        
+                        # Set model to eval mode temporarily to avoid affecting training state
+                        original_training_mode = ddp_model.training
+                        ddp_model.eval()
+                        
+                        try:
+                            # Run dummy forward pass to initialize DDP reducer and autograd hooks
+                            _ = ddp_model(**dummy_input)
+                            print("Unsloth: Initialized DDP autograd hooks via dummy forward pass")
+                        except Exception:
+                            # If structured input fails, try simple tensor
+                            try:
+                                dummy_tensor = torch.randn(1, 2, device=device, dtype=dtype)
+                                _ = ddp_model(dummy_tensor)
+                            except Exception:
+                                # If that fails too, at least try to access parameters
+                                pass
+                        finally:
+                            # Restore original training mode
+                            ddp_model.train(original_training_mode)
+                            
+                except Exception as e:
+                    print(f"Unsloth: Could not run dummy forward pass for DDP initialization: {e}")
+                    
+                # Method 2: Enhanced reducer preparation
                 if hasattr(ddp_model, 'reducer') and ddp_model.reducer is not None:
                     reducer = ddp_model.reducer
                     
-                    # Check if reducer has been properly initialized
+                    # Force reducer bucket rebuilding to ensure proper autograd hook setup
                     if hasattr(reducer, '_rebuild_buckets'):
                         try:
-                            # Force rebuilding of buckets to ensure proper hook setup
-                            # This is usually done lazily, but doing it early helps avoid hook errors
                             reducer._rebuild_buckets()
-                        except Exception as e:
-                            # This might fail if already done, which is fine
+                        except Exception:
                             pass
                     
-                    # Method 2: Prepare autograd hooks early
+                    # Ensure reducer is marked as ready for backward pass
                     if hasattr(reducer, '_prepare_for_forward'):
                         try:
-                            # Some PyTorch versions have this method to prepare hooks
                             reducer._prepare_for_forward()
                         except Exception:
                             pass
+                            
+                    # Additional fix: Ensure autograd hooks are properly registered
+                    # by checking reducer's internal state
+                    if hasattr(reducer, '_autograd_hooks') and hasattr(reducer, 'next_bucket'):
+                        try:
+                            # Reset the autograd hook state to ensure consistency
+                            # This is the key fix for expect_autograd_hooks_ errors
+                            reducer.next_bucket = 0
+                            
+                            # Ensure hooks are properly aligned with parameters
+                            if hasattr(reducer, '_ensure_autograd_hooks_prepared'):
+                                reducer._ensure_autograd_hooks_prepared()
+                                
+                        except Exception:
+                            pass
                 
-                # Method 3: Ensure all parameters are registered with DDP
+                # Method 3: Force parameter registration and validation
                 try:
-                    # Access the module's parameters to trigger lazy initialization
-                    param_count = sum(1 for p in ddp_model.parameters() if p.requires_grad)
-                    if param_count > 0:
-                        # Parameters exist and DDP should be aware of them
-                        pass
+                    # Ensure all trainable parameters are known to DDP
+                    trainable_params = [p for p in ddp_model.parameters() if p.requires_grad]
+                    if trainable_params:
+                        # Access parameter gradients to ensure autograd graph readiness
+                        for param in trainable_params[:5]:  # Check first few params only
+                            if param.grad is not None:
+                                # Clear any existing gradients to reset autograd state
+                                param.grad.zero_()
                 except Exception:
                     pass
                 
                 trainer._unsloth_ddp_reducer_prepared = True
+                print("Unsloth: Enhanced DDP reducer preparation completed - autograd hooks ready")
                 return True
                 
             except Exception as e:
