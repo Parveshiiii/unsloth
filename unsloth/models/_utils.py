@@ -687,6 +687,19 @@ patch_torch_compile(
     ignore_errors = UNSLOTH_COMPILE_IGNORE_ERRORS,
 )
 
+# Configure torch._dynamo cache size limit to handle MoE models
+# Default is typically 8, but MoE models with dynamic routing require much higher limits
+# to avoid FailOnRecompileLimitHit errors during training (issue #18)
+# The high cache size is needed because MoE layers create many different computation
+# graphs due to dynamic expert selection, causing frequent recompilations
+UNSLOTH_DYNAMO_CACHE_SIZE = int(os.environ.get("UNSLOTH_DYNAMO_CACHE_SIZE", "128"))
+try:
+    import torch._dynamo.config
+    torch._dynamo.config.cache_size_limit = UNSLOTH_DYNAMO_CACHE_SIZE
+except (ImportError, AttributeError):
+    # Fallback for older PyTorch versions that might not have this config
+    pass
+
 torch_compile_options = {
     "epilogue_fusion"   : True,
     "max_autotune"      : True,
