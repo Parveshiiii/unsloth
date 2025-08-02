@@ -218,7 +218,7 @@ class UnslothTrainer(SFTTrainer):
                             device = first_param.device
                             dtype = first_param.dtype
                             
-                            # Create minimal dummy input - most models expect input_ids
+                            # Create minimal dummy input - most transformer models expect input_ids
                             dummy_input = {
                                 'input_ids': torch.tensor([[1, 2]], device=device, dtype=torch.long),
                                 'attention_mask': torch.tensor([[1, 1]], device=device, dtype=torch.long),
@@ -230,16 +230,19 @@ class UnslothTrainer(SFTTrainer):
                             
                             try:
                                 # Run dummy forward pass to initialize DDP reducer and autograd hooks
-                                _ = ddp_model(**dummy_input)
+                                with torch.cuda.amp.autocast(enabled=False):  # Disable autocast for dummy pass
+                                    _ = ddp_model(**dummy_input)
                                 print("Unsloth: Initialized DDP autograd hooks via dummy forward pass")
                             except Exception:
-                                # If structured input fails, try simple tensor
+                                # If structured input fails, try simple tensor input
                                 try:
                                     dummy_tensor = torch.randn(1, 2, device=device, dtype=dtype)
-                                    _ = ddp_model(dummy_tensor)
+                                    with torch.cuda.amp.autocast(enabled=False):
+                                        _ = ddp_model(dummy_tensor)
+                                    print("Unsloth: Initialized DDP autograd hooks via dummy tensor input")
                                 except Exception:
-                                    # If that fails too, at least try to access parameters
-                                    pass
+                                    # If both fail, still continue - the other methods may help
+                                    print("Unsloth: Could not run dummy forward pass, relying on other DDP fixes")
                             finally:
                                 # Restore original training mode
                                 ddp_model.train(original_training_mode)
@@ -638,7 +641,7 @@ def _prepare_ddp_reducer_for_training(trainer, model):
                         device = first_param.device
                         dtype = first_param.dtype
                         
-                        # Create minimal dummy input - most models expect input_ids
+                        # Create minimal dummy input - most transformer models expect input_ids
                         dummy_input = {
                             'input_ids': torch.tensor([[1, 2]], device=device, dtype=torch.long),
                             'attention_mask': torch.tensor([[1, 1]], device=device, dtype=torch.long),
@@ -650,16 +653,19 @@ def _prepare_ddp_reducer_for_training(trainer, model):
                         
                         try:
                             # Run dummy forward pass to initialize DDP reducer and autograd hooks
-                            _ = ddp_model(**dummy_input)
+                            with torch.cuda.amp.autocast(enabled=False):  # Disable autocast for dummy pass
+                                _ = ddp_model(**dummy_input)
                             print("Unsloth: Initialized DDP autograd hooks via dummy forward pass")
                         except Exception:
-                            # If structured input fails, try simple tensor
+                            # If structured input fails, try simple tensor input
                             try:
                                 dummy_tensor = torch.randn(1, 2, device=device, dtype=dtype)
-                                _ = ddp_model(dummy_tensor)
+                                with torch.cuda.amp.autocast(enabled=False):
+                                    _ = ddp_model(dummy_tensor)
+                                print("Unsloth: Initialized DDP autograd hooks via dummy tensor input")
                             except Exception:
-                                # If that fails too, at least try to access parameters
-                                pass
+                                # If both fail, still continue - the other methods may help
+                                print("Unsloth: Could not run dummy forward pass, relying on other DDP fixes")
                         finally:
                             # Restore original training mode
                             ddp_model.train(original_training_mode)
