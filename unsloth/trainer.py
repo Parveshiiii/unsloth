@@ -54,11 +54,7 @@ else:
                 "If you want to use our fix inside of HF, please update `transformers` to the latest version via:\n"\
                 '`pip uninstall transformers -y && pip install --upgrade --no-cache-dir transformers`'
             )
-        print(
-            "Unsloth: Using our custom gradient accumulation fixed trainer, which is not feature complete.\n"\
-            "If you want to use our fix inside of HF, please update `transformers` to the latest version via:\n"\
-            '`pip uninstall transformers -y && pip install --upgrade --no-cache-dir transformers`'
-        )
+
         return _unsloth_train(trainer)
     pass
 pass
@@ -96,7 +92,7 @@ def _create_unsloth_optimizer(
         if name.endswith("modules_to_save.default.weight"):
             partial_name = name[:-len(".modules_to_save.default.weight")]
             partial_name = partial_name[partial_name.rfind(".")+1:]
-            print(f"Unsloth: Setting lr = {embedding_lr:.2e} instead of {lr:.2e} for {partial_name}.")
+
             param_groups["embeddings"]    [name] = param
         else:
             param_groups["non_embeddings"][name] = param
@@ -232,17 +228,17 @@ class UnslothTrainer(SFTTrainer):
                                 # Run dummy forward pass to initialize DDP reducer and autograd hooks
                                 with torch.amp.autocast('cuda', enabled=False):  # Disable autocast for dummy pass
                                     _ = ddp_model(**dummy_input)
-                                print("Unsloth: Initialized DDP autograd hooks via dummy forward pass")
+
                             except Exception:
                                 # If structured input fails, try simple tensor input
                                 try:
                                     dummy_tensor = torch.randn(1, 2, device=device, dtype=dtype)
                                     with torch.amp.autocast('cuda', enabled=False):
                                         _ = ddp_model(dummy_tensor)
-                                    print("Unsloth: Initialized DDP autograd hooks via dummy tensor input")
+
                                 except Exception:
                                     # If both fail, still continue - the other methods may help
-                                    print("Unsloth: Could not run dummy forward pass, relying on other DDP fixes")
+                                    pass
                             finally:
                                 # Restore original training mode
                                 ddp_model.train(original_training_mode)
@@ -297,7 +293,7 @@ class UnslothTrainer(SFTTrainer):
                         pass
                     
                     self._unsloth_ddp_reducer_prepared = True
-                    print("Unsloth: Enhanced DDP reducer preparation completed - autograd hooks ready")
+
                     return True
                     
                 except Exception as e:
@@ -430,20 +426,15 @@ def _setup_distributed_training():
                 if torch.cuda.is_available():
                     torch.cuda.set_device(local_rank)
                 dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
-                print(f"Unsloth: Initialized distributed training on rank {local_rank}")
+
                 
-                # Set up proper device mapping for this rank
-                if torch.cuda.is_available():
-                    device = torch.device(f"cuda:{local_rank}")
-                    print(f"Unsloth: Using device {device} for rank {local_rank}")
+
                 
         except Exception as e:
             print(f"Unsloth: Failed to initialize distributed training: {e}")
             print("Unsloth: Falling back to single-GPU training")
     elif multi_gpu_config["supports_multi_gpu"] and multi_gpu_config["enable_multi_gpu"]:
-        print(f"Unsloth: Multi-GPU setup detected ({multi_gpu_config['device_count']} GPUs) but not using distributed training")
-        print("Unsloth: For true distributed training, launch with: torchrun --nproc_per_node={} your_script.py".format(multi_gpu_config['device_count']))
-
+        pass
 
 def _find_ddp_model(model):
     """Recursively search for DDP-wrapped model in the model hierarchy."""
@@ -526,12 +517,12 @@ def _setup_ddp_static_graph(model):
     
     # Allow users to disable the fix if needed
     if os.environ.get("UNSLOTH_DISABLE_DDP_STATIC_GRAPH", "0") == "1":
-        print("Unsloth: DDP static graph optimization disabled by environment variable")
+
         return False
     
     # Allow users to force disable due to gradient checkpointing
     if os.environ.get("UNSLOTH_DISABLE_DDP_STATIC_GRAPH_FOR_GRAD_CHECKPOINT", "0") == "1":
-        print("Unsloth: DDP static graph optimization disabled for gradient checkpointing compatibility")
+
         return False
     
     # Only proceed if we're in a distributed environment
@@ -614,9 +605,7 @@ def _setup_ddp_static_graph(model):
                 
                 # If gradient checkpointing is detected, disable static graph
                 if uses_gradient_checkpointing:
-                    print("Unsloth: Gradient checkpointing detected - disabling DDP static graph to prevent graph change errors")
-                    print("Unsloth: This ensures compatibility between gradient checkpointing and DDP")
-                    print("Unsloth: Set UNSLOTH_DISABLE_DDP_STATIC_GRAPH_FOR_GRAD_CHECKPOINT=1 to force this behavior")
+
                     # Don't set static graph when gradient checkpointing is active
                     return False
                     
@@ -643,7 +632,7 @@ def _setup_ddp_static_graph(model):
                 # Enable static graph optimization for DDP ONLY if no gradient checkpointing
                 # This is safe for most fine-tuning scenarios where the computation graph is static
                 ddp_model._set_static_graph()
-                print("Unsloth: Enabled DDP static graph optimization (no gradient checkpointing detected)")
+
                 
                 # Additional safeguard: Mark all parameters as ready to help with autograd hooks
                 # This prevents expect_autograd_hooks_ errors by ensuring proper hook state
@@ -726,17 +715,17 @@ def _prepare_ddp_reducer_for_training(trainer, model):
                             # Run dummy forward pass to initialize DDP reducer and autograd hooks
                             with torch.cuda.amp.autocast(enabled=False):  # Disable autocast for dummy pass
                                 _ = ddp_model(**dummy_input)
-                            print("Unsloth: Initialized DDP autograd hooks via dummy forward pass")
+
                         except Exception:
                             # If structured input fails, try simple tensor input
                             try:
                                 dummy_tensor = torch.randn(1, 2, device=device, dtype=dtype)
                                 with torch.cuda.amp.autocast(enabled=False):
                                     _ = ddp_model(dummy_tensor)
-                                print("Unsloth: Initialized DDP autograd hooks via dummy tensor input")
+
                             except Exception:
                                 # If both fail, still continue - the other methods may help
-                                print("Unsloth: Could not run dummy forward pass, relying on other DDP fixes")
+                                pass
                         finally:
                             # Restore original training mode
                             ddp_model.train(original_training_mode)
@@ -791,7 +780,7 @@ def _prepare_ddp_reducer_for_training(trainer, model):
                     pass
                 
                 trainer._unsloth_ddp_reducer_prepared = True
-                print("Unsloth: Enhanced DDP reducer preparation completed - autograd hooks ready")
+
                 return True
                 
             except Exception as e:
