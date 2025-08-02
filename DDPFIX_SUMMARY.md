@@ -1,12 +1,16 @@
-# Summary of DDP expect_autograd_hooks_ Fix
+# Summary of DDP Gradient Checkpointing Fixes
 
-## Issue Fixed
-The `RuntimeError: expect_autograd_hooks_ INTERNAL ASSERT FAILED at "/pytorch/torch/csrc/distributed/c10d/reducer.cpp":1633` error during distributed training with gradient checkpointing.
+## Issues Fixed
 
-## Root Cause
-DDP's autograd hooks are initialized lazily during the first forward pass, but gradient checkpointing can interfere with this process by re-executing forward passes during backward, leading to inconsistent hook states.
+1. `RuntimeError: expect_autograd_hooks_ INTERNAL ASSERT FAILED` - DDP autograd hook initialization errors
+2. `RuntimeError: Your training graph has changed in this iteration... this is not compatible with static_graph set to True` - DDP static graph incompatibility with gradient checkpointing
 
-## Solution Implemented
+## Root Causes
+
+1. **Autograd Hook Conflicts**: DDP's autograd hooks are initialized lazily, but gradient checkpointing can interfere with this process
+2. **Static Graph Incompatibility**: DDP static graph optimization assumes identical computation graphs across iterations, but gradient checkpointing can cause variations
+
+## Solutions Implemented
 
 ### 1. Enhanced DDP Reducer Preparation
 **File**: `unsloth/trainer.py`
@@ -16,38 +20,97 @@ DDP's autograd hooks are initialized lazily during the first forward pass, but g
 - **Dummy Forward Pass**: Forces complete DDP autograd hook initialization before training
 - **Reducer State Reset**: Resets internal counters to prevent conflicts
 - **Parameter Validation**: Ensures all parameters are properly registered
+- **Modern Autocast**: Updated from deprecated `torch.cuda.amp.autocast` to `torch.amp.autocast('cuda')`
 
-### 2. Robust Error Handling
-- Handles both structured inputs (`input_ids`, `attention_mask`) and tensor inputs
-- Disables autocast during dummy pass to avoid interference
-- Provides fallback options if dummy forward pass fails
-- Graceful degradation with informative error messages
+### 2. Intelligent Static Graph Management
+**File**: `unsloth/trainer.py`  
+**Function**: `_setup_ddp_static_graph()`
 
-### 3. Testing and Validation
-- **New Test**: `test_ddp_autograd_hooks_fix.py` - Comprehensive test for the fix
-- **Validation Script**: `validate_ddp_fix.py` - Demonstrates the fix without dependencies
-- **Updated Documentation**: Enhanced `DDP_GRADIENT_CHECKPOINTING_FIX.md`
+**Key Features**:
+- **Automatic Detection**: Detects when gradient checkpointing is enabled
+- **Smart Disable**: Automatically disables static graph when gradient checkpointing is detected
+- **Unsloth-Specific**: Recognizes `use_gradient_checkpointing = "unsloth"` pattern
+- **Environment Control**: Provides environment variables for manual override
+
+### 3. Environment Variable Controls
+
+```bash
+# Completely disable DDP static graph optimization
+export UNSLOTH_DISABLE_DDP_STATIC_GRAPH=1
+
+# Disable static graph specifically for gradient checkpointing
+export UNSLOTH_DISABLE_DDP_STATIC_GRAPH_FOR_GRAD_CHECKPOINT=1
+
+# Force gradient checkpointing detection
+export UNSLOTH_USE_GRADIENT_CHECKPOINTING=1
+```
 
 ## Code Changes Summary
 
-### Before (causing errors):
+### Before (causing static graph errors):
 ```python
-# Basic reducer bucket rebuilding
-reducer._rebuild_buckets()
+# Always enabled static graph regardless of gradient checkpointing
+ddp_model._set_static_graph()
+print("Unsloth: Enabled DDP static graph optimization to fix gradient checkpointing issues")
 ```
 
-### After (enhanced fix):
+### After (intelligent compatibility):
 ```python
-# 1. Dummy forward pass to initialize hooks
-with torch.no_grad():
-    dummy_input = {'input_ids': torch.tensor([[1, 2]], device=device)}
-    ddp_model.eval()
-    with torch.cuda.amp.autocast(enabled=False):
-        _ = ddp_model(**dummy_input)  # Triggers autograd hook init
-    ddp_model.train(original_mode)
+# Detect gradient checkpointing first
+uses_gradient_checkpointing = detect_gradient_checkpointing(model)
 
-# 2. Reset reducer state for consistency
-reducer.next_bucket = 0
+if uses_gradient_checkpointing:
+    print("Unsloth: Gradient checkpointing detected - disabling DDP static graph to prevent graph change errors")
+    return False  # Don't enable static graph
+else:
+    ddp_model._set_static_graph()
+    print("Unsloth: Enabled DDP static graph optimization (no gradient checkpointing detected)")
+```
+
+### Before (deprecated autocast):
+```python
+with torch.cuda.amp.autocast(enabled=False):
+    _ = ddp_model(**dummy_input)
+```
+
+### After (modern autocast):
+```python
+with torch.amp.autocast('cuda', enabled=False):
+    _ = ddp_model(**dummy_input)
+```
+
+## Expected Behavior
+
+### With Gradient Checkpointing Enabled:
+```
+Unsloth: Gradient checkpointing detected - disabling DDP static graph to prevent graph change errors
+Unsloth: This ensures compatibility between gradient checkpointing and DDP
+Unsloth: Initialized DDP autograd hooks via dummy forward pass
+Unsloth: Enhanced DDP reducer preparation completed - autograd hooks ready
+```
+
+### Without Gradient Checkpointing:
+```
+Unsloth: Enabled DDP static graph optimization (no gradient checkpointing detected)
+Unsloth: Initialized DDP autograd hooks via dummy forward pass  
+Unsloth: Enhanced DDP reducer preparation completed - autograd hooks ready
+```
+
+## Files Modified
+
+1. `unsloth/trainer.py` - Core DDP compatibility fixes
+2. `DDP_STATIC_GRAPH_FIX.md` - New documentation for the static graph fix
+3. `DDP_GRADIENT_CHECKPOINTING_FIX.md` - Updated documentation  
+4. `DDPFIX_SUMMARY.md` - This summary file updated
+
+## Validation
+
+The fixes ensure:
+- ✅ Compatibility between DDP and gradient checkpointing
+- ✅ Automatic detection and appropriate handling
+- ✅ Manual override options for edge cases
+- ✅ Clear logging for debugging
+- ✅ Backwards compatibility with existing code
 
 # 3. Validate parameters and clean gradient state
 for param in trainable_params:

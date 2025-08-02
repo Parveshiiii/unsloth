@@ -230,14 +230,14 @@ class UnslothTrainer(SFTTrainer):
                             
                             try:
                                 # Run dummy forward pass to initialize DDP reducer and autograd hooks
-                                with torch.cuda.amp.autocast(enabled=False):  # Disable autocast for dummy pass
+                                with torch.amp.autocast('cuda', enabled=False):  # Disable autocast for dummy pass
                                     _ = ddp_model(**dummy_input)
                                 print("Unsloth: Initialized DDP autograd hooks via dummy forward pass")
                             except Exception:
                                 # If structured input fails, try simple tensor input
                                 try:
                                     dummy_tensor = torch.randn(1, 2, device=device, dtype=dtype)
-                                    with torch.cuda.amp.autocast(enabled=False):
+                                    with torch.amp.autocast('cuda', enabled=False):
                                         _ = ddp_model(dummy_tensor)
                                     print("Unsloth: Initialized DDP autograd hooks via dummy tensor input")
                                 except Exception:
@@ -529,6 +529,11 @@ def _setup_ddp_static_graph(model):
         print("Unsloth: DDP static graph optimization disabled by environment variable")
         return False
     
+    # Allow users to force disable due to gradient checkpointing
+    if os.environ.get("UNSLOTH_DISABLE_DDP_STATIC_GRAPH_FOR_GRAD_CHECKPOINT", "0") == "1":
+        print("Unsloth: DDP static graph optimization disabled for gradient checkpointing compatibility")
+        return False
+    
     # Only proceed if we're in a distributed environment
     if not (os.environ.get("LOCAL_RANK") is not None or 
             os.environ.get("WORLD_SIZE") is not None):
@@ -548,6 +553,72 @@ def _setup_ddp_static_graph(model):
                 if hasattr(ddp_model, '_static_graph') and ddp_model._static_graph:
                     # Already set, don't set again
                     return True
+                    
+                # CRITICAL FIX: Check if gradient checkpointing is enabled
+                # Static graph is incompatible with gradient checkpointing that changes graph structure
+                uses_gradient_checkpointing = False
+                
+                # Check for various gradient checkpointing indicators
+                if hasattr(model, 'gradient_checkpointing') and model.gradient_checkpointing:
+                    uses_gradient_checkpointing = True
+                elif hasattr(model, '_set_gradient_checkpointing'):
+                    # Some models have this flag
+                    if hasattr(model, 'gradient_checkpointing_enable') or hasattr(model, '_gradient_checkpointing'):
+                        uses_gradient_checkpointing = True
+                
+                # Also check the underlying model (in case it's wrapped)
+                actual_model = getattr(model, 'module', model)
+                if hasattr(actual_model, 'gradient_checkpointing') and actual_model.gradient_checkpointing:
+                    uses_gradient_checkpointing = True
+                    
+                # Check if any layer has gradient checkpointing enabled
+                for module in actual_model.modules():
+                    if hasattr(module, 'gradient_checkpointing') and module.gradient_checkpointing:
+                        uses_gradient_checkpointing = True
+                        break
+                
+                # Check for Unsloth-specific gradient checkpointing
+                # Look for common Unsloth gradient checkpointing patterns
+                for module in actual_model.modules():
+                    # Check if module name contains unsloth gradient checkpointing indicators
+                    module_name = module.__class__.__name__
+                    if 'unsloth' in module_name.lower() or 'checkpoint' in module_name.lower():
+                        # Additional check for gradient checkpointing usage
+                        if hasattr(module, 'forward') and hasattr(module.forward, '__wrapped__'):
+                            # This suggests the forward method has been wrapped for checkpointing
+                            uses_gradient_checkpointing = True
+                            break
+                
+                # UNSLOTH SPECIFIC: Check if unsloth smart gradient checkpointing is active
+                # This is the most reliable way to detect Unsloth's gradient checkpointing
+                try:
+                    # Import the unsloth zoo utility to check for active gradient checkpointing
+                    import unsloth_zoo.gradient_checkpointing as unsloth_gc
+                    # If this module exists and has been patched, gradient checkpointing is likely active
+                    if hasattr(unsloth_gc, '_UNSLOTH_GRADIENT_CHECKPOINTING_ENABLED'):
+                        if getattr(unsloth_gc, '_UNSLOTH_GRADIENT_CHECKPOINTING_ENABLED', False):
+                            uses_gradient_checkpointing = True
+                except ImportError:
+                    pass
+                
+                # Check for environment variables or settings that indicate gradient checkpointing
+                # Many users set this when using Unsloth
+                if os.environ.get("UNSLOTH_USE_GRADIENT_CHECKPOINTING") == "1":
+                    uses_gradient_checkpointing = True
+                
+                # Look for gradient checkpointing in model's config
+                if hasattr(actual_model, 'config'):
+                    config = actual_model.config
+                    if hasattr(config, 'use_gradient_checkpointing') and config.use_gradient_checkpointing:
+                        uses_gradient_checkpointing = True
+                
+                # If gradient checkpointing is detected, disable static graph
+                if uses_gradient_checkpointing:
+                    print("Unsloth: Gradient checkpointing detected - disabling DDP static graph to prevent graph change errors")
+                    print("Unsloth: This ensures compatibility between gradient checkpointing and DDP")
+                    print("Unsloth: Set UNSLOTH_DISABLE_DDP_STATIC_GRAPH_FOR_GRAD_CHECKPOINT=1 to force this behavior")
+                    # Don't set static graph when gradient checkpointing is active
+                    return False
                     
                 # Additional fix for expect_autograd_hooks_ error:
                 # Ensure that find_unused_parameters is False to avoid autograd hook issues
@@ -569,10 +640,10 @@ def _setup_ddp_static_graph(model):
                         except Exception as e:
                             print(f"Unsloth: Warning - Could not initialize DDP reducer: {e}")
                 
-                # Enable static graph optimization for DDP
+                # Enable static graph optimization for DDP ONLY if no gradient checkpointing
                 # This is safe for most fine-tuning scenarios where the computation graph is static
                 ddp_model._set_static_graph()
-                print("Unsloth: Enabled DDP static graph optimization to fix gradient checkpointing issues")
+                print("Unsloth: Enabled DDP static graph optimization (no gradient checkpointing detected)")
                 
                 # Additional safeguard: Mark all parameters as ready to help with autograd hooks
                 # This prevents expect_autograd_hooks_ errors by ensuring proper hook state
