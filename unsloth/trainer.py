@@ -159,18 +159,40 @@ class UnslothTrainer(SFTTrainer):
             accelerator_model = None
             if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'model'):
                 accelerator_model = self.accelerator.model
-            for model_ref in [model, getattr(self, 'model', None), accelerator_model]:
+            
+            # Try all possible model references
+            model_candidates = [model, getattr(self, 'model', None), accelerator_model]
+            
+            # Also add the trainer itself as a candidate in case the model is nested in it
+            if hasattr(self, 'accelerator'):
+                model_candidates.extend([
+                    self.accelerator,
+                    getattr(self.accelerator, '_models', None),
+                    getattr(self.accelerator, '_prepared_models', None)
+                ])
+            
+            for model_ref in model_candidates:
                 if model_ref is not None:
                     if self._setup_ddp_static_graph(model_ref):
                         success = True
                         break
+            
             self._unsloth_ddp_static_graph_setup_done = True
             
             if not success:
-                # Last resort: try to find DDP model in accelerator
+                # Last resort: try to find DDP model in accelerator with more thorough search
                 try:
-                    if hasattr(self, 'accelerator') and hasattr(self.accelerator, 'model'):
-                        self._setup_ddp_static_graph(self.accelerator.model)
+                    if hasattr(self, 'accelerator'):
+                        # Try all attributes of accelerator that might contain models
+                        for attr_name in dir(self.accelerator):
+                            if 'model' in attr_name.lower() and not attr_name.startswith('_'):
+                                try:
+                                    attr_value = getattr(self.accelerator, attr_name)
+                                    if attr_value is not None and self._setup_ddp_static_graph(attr_value):
+                                        success = True
+                                        break
+                                except (AttributeError, RuntimeError):
+                                    continue
                 except:
                     pass
             return success
@@ -440,9 +462,13 @@ def _find_ddp_model(model):
     """Recursively search for DDP-wrapped model in the model hierarchy."""
     from torch.nn.parallel import DistributedDataParallel as DDP
     
-    # Check current model
+    # First, do a direct check - this catches the most obvious cases
     if isinstance(model, DDP):
         return model
+    
+    # Second, check the common .module pattern
+    if hasattr(model, 'module') and isinstance(model.module, DDP):
+        return model.module
     
     # Track visited objects to avoid infinite recursion
     visited = set()
@@ -469,10 +495,15 @@ def _find_ddp_model(model):
             'core_model', '_core_model', 'underlying_model', '_underlying_model',
             # Accelerate library attributes
             '_ddp_module', '_orig_ddp_module', '_accelerate_wrapped_model',
+            '_prepared_model', '_models', '_model_ref', '_original_model',
+            # Accelerate internal model references
+            '_accelerate_model', '_prepared', '_prep_model',
             # Transformers library attributes  
             '_transformers_model', '_hf_model',
             # TRL/SFT trainer attributes
-            '_sft_model', '_trl_model'
+            '_sft_model', '_trl_model',
+            # Additional nested patterns found in distributed training
+            '_distributed_model', '_ddp_wrapped', '_wrapped', '_ref'
         ]
         
         for attr_name in search_attrs:
@@ -520,7 +551,34 @@ def _find_ddp_model(model):
         
         return None
     
-    return _recursive_search(model)
+    # First try the basic recursive search
+    result = _recursive_search(model)
+    if result is not None:
+        return result
+    
+    # Enhanced search: If we still haven't found it, try some additional patterns
+    # that are specific to accelerate and distributed training setups
+    try:
+        # Check if this is actually a reference to a trainer/accelerator object
+        # that might have the DDP model nested deeper
+        for attr in ['accelerator', '_accelerator', 'trainer', '_trainer']:
+            if hasattr(model, attr):
+                accelerator_obj = getattr(model, attr)
+                if accelerator_obj is not None:
+                    # Look for model in accelerator
+                    for model_attr in ['model', '_model', 'prepared_model', '_prepared_model']:
+                        if hasattr(accelerator_obj, model_attr):
+                            acc_model = getattr(accelerator_obj, model_attr)
+                            if isinstance(acc_model, DDP):
+                                return acc_model
+                            # Recursive search on accelerator's model
+                            found = _recursive_search(acc_model)
+                            if found is not None:
+                                return found
+    except (AttributeError, RuntimeError):
+        pass
+    
+    return None
 
 
 def _setup_ddp_static_graph(model):
@@ -667,8 +725,22 @@ def _setup_ddp_static_graph(model):
             # Only print warning in distributed environment where we expect to find DDP
             if (os.environ.get("LOCAL_RANK") is not None and 
                 os.environ.get("WORLD_SIZE") is not None):
+                
+                # Add more helpful debugging information
+                model_type = type(model).__name__
+                model_attrs = [attr for attr in dir(model) if 'model' in attr.lower() or 'module' in attr.lower()][:5]
+                
                 print("Unsloth: Warning - Could not find DDP-wrapped model for static graph optimization")
                 print("Unsloth: If you encounter 'parameter marked ready twice' or 'expect_autograd_hooks_' errors, this is the likely cause")
+                print(f"Unsloth: Model type: {model_type}, searched attributes: {model_attrs}")
+                
+                # Try one more time with verbose debugging
+                from torch.nn.parallel import DistributedDataParallel as DDP
+                if isinstance(model, DDP):
+                    print("Unsloth: DEBUG - Model is actually DDP but wasn't detected in initial search")
+                elif hasattr(model, 'module') and isinstance(model.module, DDP):
+                    print("Unsloth: DEBUG - Model.module is DDP but wasn't detected in initial search")
+                    
             return False
             
     except Exception as e:
