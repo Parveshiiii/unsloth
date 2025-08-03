@@ -470,6 +470,25 @@ def _find_ddp_model(model):
     if hasattr(model, 'module') and isinstance(model.module, DDP):
         return model.module
     
+    # CRITICAL FIX: Handle PEFT models specifically
+    # PEFT models (PeftModel, PeftModelForCausalLM, etc.) wrap the base model
+    # The DDP wrapper might be at the base_model level
+    model_type_name = type(model).__name__
+    if 'Peft' in model_type_name:
+        # Check for PEFT-specific attributes where the base model is stored
+        peft_base_attrs = ['base_model', 'model']
+        for attr in peft_base_attrs:
+            if hasattr(model, attr):
+                base_model = getattr(model, attr)
+                if isinstance(base_model, DDP):
+                    return base_model
+                # Some PEFT versions nest it further: base_model.model
+                if hasattr(base_model, 'model') and isinstance(base_model.model, DDP):
+                    return base_model.model
+                # Some cases have base_model.module for DDP
+                if hasattr(base_model, 'module') and isinstance(base_model.module, DDP):
+                    return base_model.module
+    
     # Track visited objects to avoid infinite recursion
     visited = set()
     
@@ -502,6 +521,8 @@ def _find_ddp_model(model):
             '_transformers_model', '_hf_model',
             # TRL/SFT trainer attributes
             '_sft_model', '_trl_model',
+            # PEFT library attributes (high priority for this fix)
+            'base_model', 'peft_model', '_peft_model', 'base_model.model',
             # Additional nested patterns found in distributed training
             '_distributed_model', '_ddp_wrapped', '_wrapped', '_ref'
         ]
@@ -519,6 +540,22 @@ def _find_ddp_model(model):
             except (AttributeError, RuntimeError):
                 # Some attributes may not be accessible
                 continue
+        
+        # PEFT-specific handling: For PEFT models, also check nested base_model.model patterns
+        obj_type_name = type(obj).__name__
+        if 'Peft' in obj_type_name and hasattr(obj, 'base_model'):
+            try:
+                base_model = obj.base_model
+                # Check if base_model has a 'model' attribute (common PEFT pattern)
+                if hasattr(base_model, 'model'):
+                    nested_model = base_model.model
+                    if isinstance(nested_model, DDP):
+                        return nested_model
+                    # Also check if the nested model has a module (DDP pattern)
+                    if hasattr(nested_model, 'module') and isinstance(nested_model.module, DDP):
+                        return nested_model.module
+            except (AttributeError, RuntimeError):
+                pass
         
         # Check if the object has _modules dict (common in PyTorch modules)
         try:
