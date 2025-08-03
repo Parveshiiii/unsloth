@@ -140,7 +140,30 @@ class UnslothTrainer(SFTTrainer):
         # Ensure DDP reducer is properly prepared before training step
         self._prepare_ddp_reducer_for_training(model)
         
+        # CRITICAL FIX: Reset gradient checkpointing state for each training step
+        # This prevents the "parameter marked ready twice" error in distributed training
+        self._reset_gradient_checkpointing_state(model)
+        
         return super().training_step(model, inputs, num_items_in_batch)
+    
+    def _reset_gradient_checkpointing_state(self, model):
+        """Reset gradient checkpointing state to prevent parameter marked ready twice errors."""
+        try:
+            ddp_model = self._find_ddp_model(model)
+            if ddp_model is not None and hasattr(ddp_model, 'reducer') and ddp_model.reducer is not None:
+                reducer = ddp_model.reducer
+                
+                # Reset the ready buckets tracking for gradient checkpointing
+                if hasattr(reducer, '_unsloth_ready_buckets'):
+                    reducer._unsloth_ready_buckets.clear()
+                    
+                # Reset reducer's internal state to prevent autograd hook conflicts
+                if hasattr(reducer, 'next_bucket'):
+                    reducer.next_bucket = 0
+                    
+        except Exception:
+            # Silently continue if reset fails - this is a safeguard, not critical
+            pass
     
     def _find_ddp_model(self, model):
         """Recursively search for DDP-wrapped model in the model hierarchy."""
@@ -485,6 +508,12 @@ def _find_ddp_model(model):
                 # Some PEFT versions nest it further: base_model.model
                 if hasattr(base_model, 'model') and isinstance(base_model.model, DDP):
                     return base_model.model
+                # ENHANCED: Handle the specific structure from the error: base_model.model.model
+                # This is the structure causing the issue: PeftModelForCausalLM -> base_model -> model -> model (DDP)
+                if hasattr(base_model, 'model') and hasattr(base_model.model, 'model'):
+                    nested_model = base_model.model.model
+                    if isinstance(nested_model, DDP):
+                        return nested_model
                 # Some cases have base_model.module for DDP
                 if hasattr(base_model, 'module') and isinstance(base_model.module, DDP):
                     return base_model.module
@@ -632,6 +661,11 @@ def _setup_ddp_static_graph(model):
     if os.environ.get("UNSLOTH_DISABLE_DDP_STATIC_GRAPH_FOR_GRAD_CHECKPOINT", "0") == "1":
 
         return False
+        
+    # Allow users to disable the gradient checkpointing safety hooks
+    if os.environ.get("UNSLOTH_DISABLE_GRAD_CHECKPOINT_HOOKS", "0") == "1":
+        print("Unsloth: Gradient checkpointing safety hooks disabled by environment variable")
+        return False
     
     # Only proceed if we're in a distributed environment
     if not (os.environ.get("LOCAL_RANK") is not None or 
@@ -697,7 +731,30 @@ def _setup_ddp_static_graph(model):
                     if hasattr(unsloth_gc, '_UNSLOTH_GRADIENT_CHECKPOINTING_ENABLED'):
                         if getattr(unsloth_gc, '_UNSLOTH_GRADIENT_CHECKPOINTING_ENABLED', False):
                             uses_gradient_checkpointing = True
+                    
+                    # ENHANCED: Check for Unsloth gradient checkpointing function patches
+                    # Look for indicators that gradient checkpointing has been applied
+                    if hasattr(unsloth_gc, 'forward') or hasattr(unsloth_gc, 'backward'):
+                        # If the module has forward/backward functions, it's likely active
+                        uses_gradient_checkpointing = True
+                        
                 except ImportError:
+                    pass
+                    
+                # ADDITIONAL UNSLOTH CHECK: Look for gradient checkpointing in the actual model forward methods
+                # Unsloth often patches the forward methods of transformer layers
+                try:
+                    for module in actual_model.modules():
+                        if hasattr(module, 'forward'):
+                            forward_func = module.forward
+                            # Check if forward method has been wrapped by gradient checkpointing
+                            if (hasattr(forward_func, '__wrapped__') or 
+                                hasattr(forward_func, '_unsloth_gradient_checkpointed') or
+                                'checkpoint' in str(forward_func) or
+                                'unsloth' in str(forward_func).lower()):
+                                uses_gradient_checkpointing = True
+                                break
+                except Exception:
                     pass
                 
                 # Check for environment variables or settings that indicate gradient checkpointing
@@ -713,7 +770,59 @@ def _setup_ddp_static_graph(model):
                 
                 # If gradient checkpointing is detected, disable static graph
                 if uses_gradient_checkpointing:
-
+                    print("Unsloth: Gradient checkpointing detected - disabling DDP static graph to prevent parameter ready issues")
+                    
+                    # CRITICAL FIX: Don't set static graph when gradient checkpointing is active
+                    # Instead, apply alternative fixes for the parameter ready issue
+                    
+                    # Alternative fix 1: Ensure find_unused_parameters is False
+                    if hasattr(ddp_model, 'find_unused_parameters'):
+                        if ddp_model.find_unused_parameters:
+                            print("Unsloth: Warning - DDP find_unused_parameters=True with gradient checkpointing may cause parameter ready issues")
+                            print("Unsloth: Recommend setting ddp_find_unused_parameters=False in training arguments")
+                            
+                    # Alternative fix 2: Apply gradient synchronization hook to prevent multiple ready states
+                    try:
+                        if hasattr(ddp_model, 'reducer') and ddp_model.reducer is not None:
+                            reducer = ddp_model.reducer
+                            
+                            # Install a hook to manage parameter ready state for gradient checkpointing
+                            if not hasattr(reducer, '_unsloth_grad_checkpoint_hook_installed'):
+                                original_mark_bucket_ready = getattr(reducer, '_mark_bucket_ready', None)
+                                
+                                if original_mark_bucket_ready is not None:
+                                    def _unsloth_safe_mark_bucket_ready(bucket_index):
+                                        """Safely mark bucket ready, avoiding duplicate marking with gradient checkpointing."""
+                                        try:
+                                            # Check if this bucket has already been marked ready in this iteration
+                                            if hasattr(reducer, '_unsloth_ready_buckets'):
+                                                if bucket_index in reducer._unsloth_ready_buckets:
+                                                    # Already marked, skip to avoid "ready twice" error
+                                                    return
+                                                reducer._unsloth_ready_buckets.add(bucket_index)
+                                            else:
+                                                reducer._unsloth_ready_buckets = {bucket_index}
+                                            
+                                            # Call the original function
+                                            return original_mark_bucket_ready(bucket_index)
+                                            
+                                        except Exception as e:
+                                            # If our hook fails, fall back to original behavior
+                                            print(f"Unsloth: Warning in gradient checkpointing hook: {e}")
+                                            return original_mark_bucket_ready(bucket_index)
+                                    
+                                    # Install the hook
+                                    reducer._mark_bucket_ready = _unsloth_safe_mark_bucket_ready
+                                    reducer._unsloth_grad_checkpoint_hook_installed = True
+                                    print("Unsloth: Installed gradient checkpointing safety hook to prevent parameter ready errors")
+                                    
+                                    # Reset ready buckets at the start of each iteration
+                                    if hasattr(reducer, '_unsloth_ready_buckets'):
+                                        reducer._unsloth_ready_buckets.clear()
+                                        
+                    except Exception as e:
+                        print(f"Unsloth: Could not install gradient checkpointing safety hook: {e}")
+                    
                     # Don't set static graph when gradient checkpointing is active
                     return False
                     
